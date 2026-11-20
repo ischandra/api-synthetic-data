@@ -150,7 +150,7 @@ body = gen.request(next(e for e in endpoints if e.key == "POST /orders")).body
 ## CI
 
 - **Jenkins:** [`Jenkinsfile`](Jenkinsfile) runs the self-tests, then generates data from `SPEC` (a file or URL parameter), runs it with `--strict`, and archives `synthetic-data/`.
-- **GitHub Actions:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the self-tests and the example generation.
+- **GitHub Actions:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the self-tests and the example generation on Python 3.11 and 3.13. The test suite has also been run on 3.9, 3.10 and 3.12; GitHub's current runners no longer provide 3.9 or 3.10.
 
 ## Project layout
 
