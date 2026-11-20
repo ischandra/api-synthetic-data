@@ -46,6 +46,26 @@ def default_base_url(raw: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _auth_for(raw: Dict[str, Any], op: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """First usable security scheme of an operation (falls back to the global ``security``)."""
+    reqs = op["security"] if "security" in op else raw.get("security")
+    if not reqs:
+        return None  # no security, or explicitly public (security: [])
+    schemes = (raw.get("components") or {}).get("securitySchemes") or raw.get("securityDefinitions") or {}
+    for req in reqs:
+        for name in req or {}:
+            sch = schemes.get(name) or {}
+            kind = str(sch.get("type", "")).lower()
+            scheme = str(sch.get("scheme", "")).lower()
+            if kind == "basic" or (kind == "http" and scheme == "basic"):
+                return {"type": "basic"}
+            if kind in ("oauth2", "openidconnect") or (kind == "http" and scheme == "bearer"):
+                return {"type": "bearer"}
+            if kind == "apikey" and sch.get("in") in ("header", "query"):
+                return {"type": "apikey", "name": sch.get("name", "X-API-Key"), "in": sch["in"]}
+    return None
+
+
 def load_openapi(src: str, headers: Optional[Dict[str, str]] = None) -> Tuple[List[Endpoint], Optional[str]]:
     """Returns (endpoints, default base URL from servers/host)."""
     raw = load_document(src, headers)
@@ -64,7 +84,8 @@ def load_openapi(src: str, headers: Optional[Dict[str, str]] = None) -> Tuple[Li
             if not isinstance(op, dict):
                 continue
             ep = Endpoint(method=method.upper(), path=path, source=name, doc=doc,
-                          operation_id=op.get("operationId"), summary=op.get("summary"), tags=list(op.get("tags") or []))
+                          operation_id=op.get("operationId"), summary=op.get("summary"), tags=list(op.get("tags") or []),
+                          auth=_auth_for(raw, op))
             merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
             for p in list(common) + list(op.get("parameters") or []):
                 p = deref(doc, p)

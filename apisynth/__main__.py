@@ -64,6 +64,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     w.add_argument("-f", "--format", default="json", help=f"comma list of {', '.join(FORMATS)} (default json)")
     w.add_argument("--name", help="dataset name (default from the first source)")
     w.add_argument("--base-url", help="base URL written into apitest/postman exports (default: spec servers)")
+    w.add_argument("--auth", default="auto",
+                   help="auth in apitest/postman exports: auto (from the spec's security, default), none, bearer, "
+                        "basic, apikey:<Header-Name>. Credentials stay variables ({{token}}, {{username}}...)")
     w.add_argument("--strict", action="store_true", help="exit 1 if the self-check finds any problem")
 
     e = sub.add_parser("endpoints", help="list endpoints found in the sources")
@@ -117,7 +120,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     name = a.name or _default_name(src)
     base_url = a.base_url or spec_base
-    written = write_all(results, Path(a.out), formats, seed, name, base_url)
+    try:
+        written = write_all(results, Path(a.out), formats, seed, name, base_url, a.auth)
+    except ValueError as ex:
+        parser.error(str(ex))
 
     print(f"{'endpoint':52} {'valid':>5} {'bound':>5} {'invalid':>7} {'hostile':>7}")
     for ep, cases in results:

@@ -5,6 +5,8 @@ info:
   description: Example spec used to demonstrate and test apisynth.
 servers:
   - url: http://localhost:8000/api/v1
+security:
+  - bearerAuth: []
 tags:
   - name: customers
   - name: orders
@@ -72,6 +74,7 @@ paths:
     post:
       tags: [auth]
       operationId: getToken
+      security: []
       requestBody:
         required: true
         content:
@@ -89,9 +92,14 @@ paths:
   /health:
     get:
       operationId: health
+      security: []
       responses:
         '200': {description: OK}
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
   parameters:
     RequestId:
       name: X-Request-Id

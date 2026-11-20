@@ -30,11 +30,31 @@ def test_generate_all_formats_from_urls(tmp_path, http_server):
     assert len(lines) > 100 and all(json.loads(l)["endpoint"] for l in lines)
     rows = list(csv.DictReader((out / "csv" / "POST_customers.valid.csv").open()))
     assert rows and "body.address.city" in rows[0]
-    suite = yaml.safe_load((out / "demo.api.yaml").read_text())
-    assert suite["base_url"] == "http://localhost:8000/api/v1"
+    suite_text = (out / "demo.api.yaml").read_text()
+    suite = yaml.safe_load(suite_text)
+    assert "base_url" not in suite  # must stay overridable by --env / --base-url
+    assert suite["variables"]["baseUrl"] == "http://localhost:8000/api/v1"
     assert any(t["expect"]["status"] == {"gte": 400, "lt": 500} for t in suite["tests"])
+    by_name = {t["name"]: t for t in suite["tests"]}
+    assert by_name["POST /customers - valid data"]["auth"] == {"bearer": "{{token}}"}  # spec: global bearer
+    assert "auth" not in by_name["POST /auth/token - valid data"]                    # spec: security: []
+    assert "--var token=..." in suite_text
     col = json.loads((out / "demo.postman_collection.json").read_text())
     assert col["info"]["schema"].startswith("https://schema.getpostman.com") and col["item"]
+    folders = {f["name"]: f for f in col["item"]}
+    assert folders["POST /customers"]["item"][0]["request"]["auth"]["type"] == "bearer"
+    assert folders["POST /auth/token"]["item"][0]["request"]["auth"]["type"] == "noauth"
+
+
+def test_auth_override(tmp_path):
+    r = run("generate", "--openapi", str(EXAMPLES / "shop-api.openapi.yaml"), "--include", "POST /orders",
+            "-f", "apitest", "-o", str(tmp_path), "--auth", "apikey:X-API-Key", "-n", "1", "--name", "x")
+    assert r.returncode == 0, r.stderr
+    t = yaml.safe_load((tmp_path / "x.api.yaml").read_text())["tests"][0]
+    assert t["auth"] == {"api_key": {"name": "X-API-Key", "value": "{{apiKey}}", "in": "header"}}
+    bad = run("generate", "--openapi", str(EXAMPLES / "shop-api.openapi.yaml"), "-f", "apitest", "-o", str(tmp_path),
+              "--auth", "magic")
+    assert bad.returncode == 2 and "Unknown auth" in bad.stderr
 
 
 def test_headers_used_for_fetching(tmp_path, http_server):

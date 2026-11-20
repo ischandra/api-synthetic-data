@@ -29,6 +29,7 @@ class Endpoint:
     tags: List[str] = field(default_factory=list)
     inferred: bool = False           # schema guessed from examples rather than declared
     body_pointer: Optional[str] = None  # JSON pointer of the body schema inside doc (for validation)
+    auth: Optional[Dict[str, str]] = None  # from the spec's security: {"type": "bearer"|"basic"|"apikey", ...}
 
     @property
     def key(self) -> str:

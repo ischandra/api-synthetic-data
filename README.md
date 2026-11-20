@@ -64,7 +64,8 @@ python -m apisynth generate --openapi spec.yaml \
   --prefer-examples         # use the spec's example values when present
   -f json,jsonl,csv,apitest,postman   # output formats (default json)
   -o synthetic-data         # output directory
-  --base-url https://qa.example.com   # written into the apitest/postman exports (default: spec servers)
+  --base-url https://qa.example.com   # default base URL in the apitest/postman exports (default: spec servers)
+  --auth auto               # auth in the exports: auto (from the spec), none, bearer, basic, apikey:<Header>
   --strict                  # exit 1 if the self-check finds a problem (for CI)
 ```
 
@@ -105,9 +106,13 @@ cp generated/orders.api.yaml ../api-test-framework/suites/
 cd ../api-test-framework && pytest suites/orders.api.yaml --env qa
 ```
 
-Add auth to the generated suite's `defaults` (e.g. `auth: {bearer: "{{token}}"}`). Each endpoint and kind becomes a data-driven test, and any case your API handles wrongly fails with the full request and response.
+Each endpoint and kind becomes a data-driven test, and any case your API handles wrongly fails with the full request and response.
 
-**Using Postman/Newman:** `-f postman`, then import the collection or run it with `newman run generated/orders.postman_collection.json --env-var baseUrl=https://qa.example.com`.
+- **Base URL:** the spec's `servers` URL is only a default. `--env qa` (from `environments/qa.yaml`) or `--base-url https://qa.example.com` overrides it.
+- **Auth:** added automatically from the spec's `securitySchemes` and `security`. Public endpoints (`security: []`) get none. Credentials stay variables, so you pass them at run time: `--var token=...` for bearer/OAuth2, `--var username=... --var password=...` for basic, `--var apiKey=...` for API keys, or put them in the environment file.
+- **Choosing auth yourself:** use `--auth bearer|basic|apikey:<Header-Name>|none`, e.g. for Postman/URL sources that have no security info.
+
+**Using Postman/Newman:** `-f postman`, then import the collection or run it with `newman run generated/orders.postman_collection.json --env-var baseUrl=https://qa.example.com --env-var token=...`. Auth is set per request the same way.
 
 **What to expect from the results:**
 - **An invalid case that gets a 2xx** is a validation gap in the API: it accepts data its own contract says is wrong.
