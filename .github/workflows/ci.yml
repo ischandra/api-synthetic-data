@@ -1,0 +1,28 @@
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+      - name: Generate example data
+        run: |
+          python -m apisynth generate --openapi examples/shop-api.openapi.yaml \
+            --postman examples/inventory.postman_collection.json \
+            --sample "examples/employees-response.json -> POST /employees" \
+            --hostile -f json,jsonl,csv,apitest,postman -o synthetic-data --strict
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-data-py${{ matrix.python-version }}
+          path: synthetic-data/

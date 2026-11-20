@@ -1,0 +1,184 @@
+openapi: 3.0.3
+info:
+  title: Shop API (example)
+  version: 1.0.0
+  description: Example spec used to demonstrate and test apisynth.
+servers:
+  - url: http://localhost:8000/api/v1
+tags:
+  - name: customers
+  - name: orders
+paths:
+  /customers:
+    get:
+      tags: [customers]
+      operationId: listCustomers
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/CustomerStatus'}}
+        - {name: q, in: query, schema: {type: string, minLength: 2, maxLength: 50}}
+      responses:
+        '200': {description: OK}
+    post:
+      tags: [customers]
+      operationId: createCustomer
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Customer'}
+      responses:
+        '201': {description: Created}
+        '400': {description: Validation error}
+  /customers/{customerId}:
+    parameters:
+      - {name: customerId, in: path, required: true, schema: {type: integer, minimum: 1}}
+    get:
+      tags: [customers]
+      operationId: getCustomer
+      responses:
+        '200': {description: OK}
+    patch:
+      tags: [customers]
+      operationId: updateCustomer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                phone: {type: string, pattern: '^\+[1-9]\d{7,14}$'}
+                status: {$ref: '#/components/schemas/CustomerStatus'}
+                marketingOptIn: {type: boolean}
+      responses:
+        '200': {description: OK}
+  /orders:
+    post:
+      tags: [orders]
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Order'}
+      responses:
+        '201': {description: Created}
+  /auth/token:
+    post:
+      tags: [auth]
+      operationId: getToken
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id, client_secret]
+              properties:
+                grant_type: {type: string, enum: [client_credentials]}
+                client_id: {type: string, minLength: 8}
+                client_secret: {type: string, minLength: 16, format: password}
+                scope: {type: string}
+      responses:
+        '200': {description: OK}
+  /health:
+    get:
+      operationId: health
+      responses:
+        '200': {description: OK}
+components:
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: {type: string, format: uuid}
+  schemas:
+    CustomerStatus:
+      type: string
+      enum: [ACTIVE, SUSPENDED, CLOSED]
+    Contact:
+      type: object
+      required: [firstName, lastName, email]
+      properties:
+        firstName: {type: string, minLength: 1, maxLength: 50}
+        lastName: {type: string, minLength: 1, maxLength: 50}
+        email: {type: string, format: email, maxLength: 254}
+        phone: {type: string, pattern: '^\+[1-9]\d{7,14}$', nullable: true}
+    Address:
+      type: object
+      required: [line1, city, postalCode, country]
+      additionalProperties: false
+      properties:
+        line1: {type: string, maxLength: 100}
+        line2: {type: string, maxLength: 100, nullable: true}
+        city: {type: string, maxLength: 60}
+        postalCode: {type: string, pattern: '^[0-9]{5}(-[0-9]{4})?$'}
+        country: {type: string, pattern: '^[A-Z]{2}$', description: ISO 3166-1 alpha-2}
+    Customer:
+      allOf:
+        - $ref: '#/components/schemas/Contact'
+        - type: object
+          required: [address]
+          properties:
+            id: {type: integer, readOnly: true}
+            createdAt: {type: string, format: date-time, readOnly: true}
+            dateOfBirth: {type: string, format: date}
+            status: {$ref: '#/components/schemas/CustomerStatus'}
+            address: {$ref: '#/components/schemas/Address'}
+            loyaltyPoints: {type: integer, minimum: 0, maximum: 100000, multipleOf: 10}
+            tags:
+              type: array
+              items: {type: string, minLength: 2, maxLength: 20}
+              maxItems: 5
+              uniqueItems: true
+    OrderLine:
+      type: object
+      required: [sku, quantity, unitPrice]
+      additionalProperties: false
+      properties:
+        sku: {type: string, pattern: '^[A-Z]{3}-\d{4}$'}
+        quantity: {type: integer, minimum: 1, maximum: 99}
+        unitPrice: {type: number, minimum: 0, exclusiveMinimum: true, maximum: 10000}
+    CardPayment:
+      type: object
+      required: [type, cardNumber, expiry]
+      properties:
+        type: {type: string, enum: [card]}
+        cardNumber: {type: string, pattern: '^\d{13,19}$'}
+        expiry: {type: string, pattern: '^(0[1-9]|1[0-2])/\d{2}$'}
+    BankTransfer:
+      type: object
+      required: [type, iban]
+      properties:
+        type: {type: string, enum: [bank_transfer]}
+        iban: {type: string, minLength: 15, maxLength: 34}
+    Order:
+      type: object
+      required: [customerId, currency, lines, payment]
+      properties:
+        id: {type: string, format: uuid, readOnly: true}
+        customerId: {type: integer, minimum: 1}
+        currency: {type: string, enum: [USD, EUR, GBP, INR]}
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: {$ref: '#/components/schemas/OrderLine'}
+        payment:
+          oneOf:
+            - $ref: '#/components/schemas/CardPayment'
+            - $ref: '#/components/schemas/BankTransfer'
+          discriminator:
+            propertyName: type
+            mapping:
+              card: '#/components/schemas/CardPayment'
+              bank_transfer: '#/components/schemas/BankTransfer'
+        couponCode: {type: string, maxLength: 12, nullable: true}
+        notes: {type: string, maxLength: 500}
+        shippingAddress: {$ref: '#/components/schemas/Address'}

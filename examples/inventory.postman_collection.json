@@ -1,0 +1,156 @@
+{
+  "info": {
+    "_postman_id": "0c9a5b8e-1111-4a2b-9c3d-000000000001",
+    "name": "Inventory API (example)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "Create product",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/products"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"ABC-1234\",\n  \"name\": \"Steel Water Bottle\",\n  \"category\": \"Kitchen\",\n  \"price\": 24.99,\n  \"currency\": \"USD\",\n  \"stock\": 120,\n  \"active\": true,\n  \"tags\": [\n    \"outdoor\",\n    \"eco\"\n  ],\n  \"supplierEmail\": \"{{$randomEmail}}\",\n  \"dimensions\": {\n    \"heightCm\": 25.5,\n    \"widthCm\": 7.0,\n    \"weightKg\": 0.4\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Create product (minimal)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/products"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"XYZ-0001\",\n  \"name\": \"Notebook\",\n  \"category\": \"Stationery\",\n  \"price\": 3.5,\n  \"currency\": \"EUR\",\n  \"stock\": 0,\n  \"active\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Update stock",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/products/:productId/stock",
+              "variable": [
+                {
+                  "key": "productId",
+                  "value": "42"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"stock\": {{newStock}},\n  \"reason\": \"restock\",\n  \"updatedBy\": \"{{userEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Search products",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/products?category=Kitchen&minPrice=10&page=1",
+              "query": [
+                {
+                  "key": "category",
+                  "value": "Kitchen"
+                },
+                {
+                  "key": "minPrice",
+                  "value": "10"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Suppliers",
+      "item": [
+        {
+          "name": "Register supplier",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/suppliers"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"companyName\": \"{{$randomCompanyName}}\",\n  \"contactName\": \"{{$randomFullName}}\",\n  \"email\": \"{{$randomEmail}}\",\n  \"phone\": \"{{$randomPhoneNumber}}\",\n  \"website\": \"{{$randomUrl}}\",\n  \"country\": \"US\",\n  \"createdAt\": \"{{$isoTimestamp}}\",\n  \"id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

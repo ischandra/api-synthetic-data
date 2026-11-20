@@ -1,0 +1,8 @@
+Faker>=19.0
+PyYAML>=6.0
+requests>=2.31
+jsonschema>=4.18
+rfc3339-validator>=0.1.4
+rfc3986-validator>=0.1.1
+rstr>=3.2.1
+pytest>=7.4

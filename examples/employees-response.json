@@ -1,0 +1,50 @@
+{
+  "data": [
+    {
+      "id": 101,
+      "firstName": "Asha",
+      "lastName": "Rao",
+      "email": "asha.rao@example.com",
+      "role": "ADMIN",
+      "department": "Engineering",
+      "startDate": "2021-04-12",
+      "active": true,
+      "manager": null,
+      "skills": [
+        "python",
+        "sql"
+      ],
+      "createdAt": "2023-01-02T10:00:00Z"
+    },
+    {
+      "id": 102,
+      "firstName": "Ben",
+      "lastName": "Okafor",
+      "email": "ben.okafor@example.org",
+      "role": "USER",
+      "department": "Sales",
+      "startDate": "2022-09-01",
+      "active": true,
+      "manager": 101,
+      "skills": [],
+      "createdAt": "2023-02-03T11:30:00Z"
+    },
+    {
+      "id": 103,
+      "firstName": "Chen",
+      "lastName": "Li",
+      "email": "chen.li@example.net",
+      "role": "USER",
+      "department": "Support",
+      "startDate": "2020-01-20",
+      "active": false,
+      "manager": 101,
+      "skills": [
+        "support"
+      ],
+      "createdAt": "2023-03-04T09:15:00Z",
+      "phone": "+1-202-555-0143"
+    }
+  ],
+  "total": 3
+}
