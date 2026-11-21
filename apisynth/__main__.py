@@ -101,8 +101,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     au.add_argument("--username", help="password grant / login endpoint user")
     au.add_argument("--password", help="password grant / login endpoint password")
     au.add_argument("--refresh-token", help="OAuth2 refresh token (refresh_token grant)")
-    au.add_argument("--client-auth", choices=["basic", "body"], default="basic",
-                    help="how client credentials are sent to the token endpoint (default basic)")
+    au.add_argument("--issuer", metavar="URL",
+                    help="OAuth/OIDC provider to discover endpoints from, e.g. PingFederate https://pf.example.com:9031, "
+                         "PingOne https://auth.pingone.com/<env-id>/as, Okta, Entra ID, Keycloak")
+    au.add_argument("--client-auth", default="auto",
+                    choices=["auto", "basic", "post", "body", "private_key_jwt", "client_secret_jwt", "tls", "none"],
+                    help="client authentication at the token endpoint (default auto: private_key_jwt with "
+                         "--client-key, else basic or post as the provider supports, tls with --cert)")
+    au.add_argument("--client-key", metavar="PEM", help="private key for private_key_jwt client authentication")
+    au.add_argument("--client-key-id", metavar="KID", help="key id (kid) of --client-key, if the provider needs it")
+    au.add_argument("--client-key-alg", help="assertion signing algorithm (default from the key: RS256, ES256...)")
+    au.add_argument("--grant", default="auto",
+                    choices=["auto", "client_credentials", "password", "authorization_code", "refresh_token"],
+                    help="OAuth grant (default auto: authorization_code with --redirect-uri and a user, password "
+                         "with a user, else client_credentials)")
+    au.add_argument("--redirect-uri", help="registered redirect URI for authorization_code (the agent logs in "
+                                           "headlessly and is never redirected there)")
+    au.add_argument("--authorize-url", help="authorization endpoint (default: from --issuer or the spec)")
+    au.add_argument("--form-user-field", help="login form username field (default: detected; PingFederate pf.username)")
+    au.add_argument("--form-pass-field", help="login form password field (default: detected; PingFederate pf.pass)")
     au.add_argument("--login", metavar="'POST /auth/login'",
                     help="log in through an endpoint first; its token (or session cookie) is used for every call")
     au.add_argument("--login-body", metavar="JSON", help='login request body (default {"username":..,"password":..})')
@@ -327,7 +344,7 @@ def _auth_config(a: argparse.Namespace):
         region, _, service = a.aws_sigv4.partition("/")
         if not service:
             raise ValueError("--aws-sigv4 expects REGION/SERVICE, e.g. us-east-1/execute-api")
-    for f in ("cert", "cert_key", "ca_bundle"):
+    for f in ("cert", "cert_key", "ca_bundle", "client_key"):
         v = getattr(a, f)
         if v and not Path(v).is_file():
             raise ValueError(f"--{f.replace('_', '-')}: file not found: {v}")
@@ -341,7 +358,10 @@ def _auth_config(a: argparse.Namespace):
         basic=pair(a.basic, "--basic"), digest=pair(a.digest, "--digest"),
         token_url=a.token_url, client_id=secret(a.client_id), client_secret=secret(a.client_secret), scope=a.scope,
         audience=a.audience, username=secret(a.username), password=secret(a.password),
-        refresh_token=secret(a.refresh_token), client_auth=a.client_auth,
+        refresh_token=secret(a.refresh_token), client_auth=a.client_auth, issuer=a.issuer,
+        client_key=a.client_key, client_key_id=a.client_key_id, client_key_alg=a.client_key_alg, grant=a.grant,
+        redirect_uri=a.redirect_uri, authorize_url=a.authorize_url, form_user_field=a.form_user_field,
+        form_pass_field=a.form_pass_field,
         login=a.login, login_body=secret(a.login_body), login_token_path=a.login_token_path,
         login_header=a.login_header, cookie=secret(a.cookie),
         cert=a.cert, cert_key=a.cert_key, ca_bundle=a.ca_bundle,

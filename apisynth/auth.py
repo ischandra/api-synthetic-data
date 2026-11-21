@@ -79,7 +79,16 @@ class AuthConfig:
     username: Optional[str] = None              # password grant / login endpoint
     password: Optional[str] = None
     refresh_token: Optional[str] = None
-    client_auth: str = "basic"                  # client credentials at the token endpoint: basic | body
+    client_auth: str = "auto"                   # basic | post | private_key_jwt | client_secret_jwt | tls | none
+    issuer: Optional[str] = None                # OIDC discovery (PingFederate, PingOne, Okta, Entra ID, Keycloak...)
+    client_key: Optional[str] = None            # PEM private key for private_key_jwt
+    client_key_id: Optional[str] = None         # "kid" header of the client assertion
+    client_key_alg: Optional[str] = None        # default from the key: RS256 / ES256...
+    grant: str = "auto"                         # client_credentials | password | authorization_code | refresh_token
+    redirect_uri: Optional[str] = None          # authorization_code (headless login)
+    authorize_url: Optional[str] = None
+    form_user_field: Optional[str] = None       # login form field names (default: detected; Ping: pf.username)
+    form_pass_field: Optional[str] = None
     # login endpoint
     login: Optional[str] = None                 # "POST /auth/login"
     login_body: Optional[str] = None            # JSON; default {"username": ..., "password": ...}
@@ -99,8 +108,14 @@ class AuthConfig:
 
     @property
     def oauth_capable(self) -> bool:
-        return bool((self.client_id and self.client_secret) or (self.username and self.password and self.token_url)
-                    or self.refresh_token)
+        client = bool(self.client_id and (self.client_secret or self.client_key or self.client_auth in ("tls", "none")))
+        user = bool(self.username and self.password and (self.token_url or self.issuer))
+        return bool(client or user or self.refresh_token)
+
+    @property
+    def token_source(self) -> bool:
+        """A token endpoint is known without looking at the spec."""
+        return bool(self.token_url or self.issuer)
 
     @property
     def aws(self) -> bool:
@@ -222,6 +237,7 @@ class AuthManager:
         self._refresh_token = cfg.refresh_token
         self._last_grant: Optional[str] = None
         self._oidc: Dict[str, str] = {}
+        self._provider_meta: Optional[Dict[str, Any]] = None
         self.used_refreshable = False
         self.failed: Optional[str] = None
         if cfg.cert:
@@ -234,11 +250,11 @@ class AuthManager:
     def can(self, s: Dict[str, Any]) -> bool:
         c, t = self.cfg, s.get("type")
         if t == "bearer":
-            return bool(c.token or c.login or (c.oauth_capable and c.token_url))
+            return bool(c.token or c.login or (c.oauth_capable and c.token_source))
         if t == "oauth2":
-            return bool(c.token or c.login or (c.oauth_capable and (c.token_url or self._flow_token_url(s))))
+            return bool(c.token or c.login or (c.oauth_capable and (c.token_source or self._flow_token_url(s))))
         if t == "openid":
-            return bool(c.token or c.login or (c.oauth_capable and (c.token_url or s.get("url"))))
+            return bool(c.token or c.login or (c.oauth_capable and (c.token_source or s.get("url"))))
         if t == "apikey":
             # a session cookie (from --login or --cookie) is how "API key in cookie" schemes are usually satisfied
             return bool(c.api_key) or (s.get("in") == "cookie" and bool(c.login or c.cookie))
@@ -323,7 +339,7 @@ class AuthManager:
                 return None
             # OAuth/OpenID endpoints get a fetched token when OAuth credentials are configured;
             # plain bearer endpoints prefer the static --token
-            can_fetch = c.oauth_capable and bool(c.token_url or self._flow_token_url(s) or s.get("url"))
+            can_fetch = c.oauth_capable and bool(c.token_source or self._flow_token_url(s) or s.get("url"))
             order = ("oauth", "token", "login") if t != "bearer" else ("token", "login", "oauth")
             for way in order:
                 if way == "token" and c.token:
@@ -334,7 +350,7 @@ class AuthManager:
                     if hdr:  # None = cookie-based session, already on the session
                         headers[hdr[0]] = hdr[1]
                     break
-                if way == "oauth" and (can_fetch or (t == "bearer" and c.oauth_capable and c.token_url)):
+                if way == "oauth" and can_fetch:
                     headers["Authorization"] = f"Bearer {self._oauth_token(s)}"
                     self.used_refreshable = True
                     break
@@ -375,8 +391,23 @@ class AuthManager:
                 return flows[name]["tokenUrl"]
         return None
 
+    def _provider(self) -> Dict[str, Any]:
+        from .oidc import discover
+        if self._provider_meta is None:
+            self._provider_meta = discover(self.session, self.cfg.issuer, self.timeout, self._tls())
+        return self._provider_meta
+
+    def _authorize_url(self, s: Dict[str, Any]) -> str:
+        flows = s.get("flows") or {}
+        url = self.cfg.authorize_url or (self._provider().get("authorization_endpoint") if self.cfg.issuer else None) \
+            or (flows.get("authorizationCode") or {}).get("authorizationUrl")
+        if not url:
+            raise AuthError("authorization_code needs an authorization endpoint: pass --issuer or --authorize-url")
+        return url if re.match(r"(?i)^https?://", url) else urljoin(self.base_url + "/", url)
+
     def _token_url(self, s: Dict[str, Any]) -> str:
-        url = self.cfg.token_url or self._flow_token_url(s)
+        url = self.cfg.token_url or (self._provider().get("token_endpoint") if self.cfg.issuer else None) \
+            or self._flow_token_url(s)
         if not url and s.get("type") == "openid" and s.get("url"):
             disc = s["url"]
             if disc not in self._oidc:
@@ -397,27 +428,31 @@ class AuthManager:
         cached = self._tokens.get(key)
         if cached and cached[1] > time.time():
             return cached[0]
-        data: Dict[str, str] = {}
-        # renew with the refresh_token grant when one was given or came from a password grant;
-        # client_credentials simply asks again (refresh tokens aren't meant for that grant)
-        if self._refresh_token and (c.refresh_token or self._last_grant in ("password", "refresh_token")):
-            data = {"grant_type": "refresh_token", "refresh_token": self._refresh_token}
-        elif c.username and c.password:
-            data = {"grant_type": "password", "username": c.username, "password": c.password}
-        elif c.client_id and c.client_secret:
-            data = {"grant_type": "client_credentials"}
-        else:
-            raise AuthError("OAuth needs --client-id/--client-secret, --username/--password or --refresh-token")
-        if scopes:
+        grant = self._grant()
+        data: Dict[str, str] = {"grant_type": grant}
+        if grant == "refresh_token":
+            data["refresh_token"] = self._refresh_token
+        elif grant == "password":
+            data.update({"username": c.username, "password": c.password})
+        elif grant == "authorization_code":
+            from .oidc import ProviderError, authorization_code_login
+            if not (c.redirect_uri and c.username and c.password and c.client_id):
+                raise AuthError("authorization_code needs --client-id, --redirect-uri, --username and --password "
+                                "(headless login); for MFA/captcha logins pass --token")
+            try:
+                code, verifier = authorization_code_login(
+                    requests.Session(), self._authorize_url(s), c.client_id, c.redirect_uri,
+                    scopes or ("openid" if c.issuer else ""), c.username, c.password, self.timeout,
+                    {**self._tls(), **({"cert": self.session.cert} if self.session.cert else {})},
+                    c.form_user_field, c.form_pass_field)
+            except (ProviderError, requests.RequestException) as e:
+                raise AuthError(f"authorization_code login failed: {e}") from e
+            data.update({"code": code, "redirect_uri": c.redirect_uri, "code_verifier": verifier})
+        if scopes and grant in ("client_credentials", "password"):
             data["scope"] = scopes
         if c.audience:
             data["audience"] = c.audience
-        auth = None
-        if c.client_id:
-            if c.client_auth == "body":
-                data.update({"client_id": c.client_id, "client_secret": c.client_secret or ""})
-            else:
-                auth = HTTPBasicAuth(c.client_id, c.client_secret or "")
+        auth = self._client_auth(data, url)
         r = self.session.post(url, data=data, auth=auth, timeout=self.timeout, headers={"Accept": "application/json"},
                               **self._tls())
         try:
@@ -425,14 +460,81 @@ class AuthManager:
         except ValueError:
             body = {}
         if r.status_code >= 400 or not isinstance(body, dict) or not body.get("access_token"):
+            if data["grant_type"] == "refresh_token":
+                self._refresh_token = None  # expired/revoked refresh token: use the original grant next time
             raise AuthError(f"OAuth {data['grant_type']} token request to {url} failed: {r.status_code} "
                             f"{(body.get('error_description') or body.get('error') or r.text)[:200] if isinstance(body, dict) else r.text[:200]}")
         if body.get("refresh_token"):
             self._refresh_token = body["refresh_token"]
+        elif data["grant_type"] == "refresh_token":
+            self._refresh_token = None  # not rotated and not re-issued: fall back to the original grant next time
         self._last_grant = data["grant_type"]
         ttl = float(body.get("expires_in") or 3600)
         self._tokens[key] = (body["access_token"], time.time() + max(ttl - 30, ttl * 0.5, 1))
         return body["access_token"]
+
+    def _grant(self) -> str:
+        c = self.cfg
+        # renew with the refresh_token grant when one was given or came with a user grant;
+        # client_credentials simply asks again (refresh tokens aren't meant for that grant)
+        if self._refresh_token and (c.refresh_token or c.grant == "refresh_token"
+                                    or self._last_grant in ("password", "refresh_token", "authorization_code")):
+            return "refresh_token"
+        if c.grant not in ("auto", "refresh_token"):
+            return c.grant
+        if c.username and c.password and c.redirect_uri:
+            return "authorization_code"
+        if c.username and c.password:
+            return "password"
+        if c.client_id:
+            return "client_credentials"
+        raise AuthError("OAuth needs --client-id (with a secret or --client-key), --username/--password "
+                        "or --refresh-token")
+
+    def _client_auth(self, data: Dict[str, str], token_url: str) -> Optional[AuthBase]:
+        """Client authentication at the token endpoint (adds to ``data`` or returns a requests auth)."""
+        from .oidc import ASSERTION_TYPE, ProviderError, client_assertion
+        c = self.cfg
+        if not c.client_id:
+            return None
+        method = {"body": "post", "client_secret_basic": "basic", "client_secret_post": "post",
+                  "tls_client_auth": "tls"}.get(c.client_auth, c.client_auth)
+        if method == "auto":
+            supported = (self._provider().get("token_endpoint_auth_methods_supported") or []) if c.issuer else []
+            if c.client_key:
+                method = "private_key_jwt"
+            elif c.client_secret:
+                method = "post" if supported and "client_secret_basic" not in supported \
+                    and "client_secret_post" in supported else "basic"
+            elif self.session.cert:
+                method = "tls"
+            else:
+                method = "none"
+        if method == "basic":
+            return HTTPBasicAuth(c.client_id, c.client_secret or "")
+        if method == "post":
+            data.update({"client_id": c.client_id, "client_secret": c.client_secret or ""})
+        elif method in ("private_key_jwt", "client_secret_jwt"):
+            try:
+                if method == "private_key_jwt":
+                    if not c.client_key:
+                        raise ProviderError("private_key_jwt needs --client-key")
+                    with open(c.client_key, "rb") as fh:
+                        key = fh.read()
+                    assertion = client_assertion(c.client_id, token_url, key_pem=key, alg=c.client_key_alg,
+                                                 kid=c.client_key_id)
+                else:
+                    assertion = client_assertion(c.client_id, token_url, secret=c.client_secret,
+                                                 alg=c.client_key_alg, kid=c.client_key_id)
+            except (ProviderError, OSError, ValueError) as e:
+                raise AuthError(f"{method}: {e}") from e
+            data.update({"client_id": c.client_id, "client_assertion_type": ASSERTION_TYPE,
+                         "client_assertion": assertion})
+        elif method in ("tls", "none"):
+            data["client_id"] = c.client_id  # mTLS client auth (cert on the session) / public client with PKCE
+        else:
+            raise AuthError(f"unknown client authentication '{c.client_auth}'")
+        return None
 
     def _login_header(self) -> Optional[Tuple[str, str]]:
         if not self._logged_in:

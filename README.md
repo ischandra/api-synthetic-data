@@ -56,8 +56,10 @@ Each endpoint uses the scheme(s) its spec declares, including alternatives ("API
 | OAuth 2.0 client credentials | `--client-id`, `--client-secret` (token URL and scopes from the spec, or `--token-url`, `--scope`, `--audience`) |
 | OAuth 2.0 password grant | `--username`, `--password` (+ client id/secret if the server needs them) |
 | OAuth 2.0 refresh token | `--refresh-token` |
-| OAuth 2.0 authorization code / implicit | these need a browser login: get a token there and pass `--token` |
-| OpenID Connect | as OAuth: the token endpoint is discovered from the spec's `openIdConnectUrl` |
+| OAuth 2.0 implicit | deprecated and browser-only: get a token and pass `--token` |
+| OpenID Connect | as OAuth: the token endpoint is discovered from the spec's `openIdConnectUrl`, or from `--issuer` |
+| OAuth 2.0 authorization code + PKCE | `--redirect-uri` with `--username/--password`: the agent logs in through the provider's login form headlessly, approves consent, and exchanges the code (it never calls the redirect URI). Not possible with MFA/captcha: pass `--token` |
+| Client authentication at the token endpoint | `--client-auth auto` (default), `basic`, `post`, `private_key_jwt` (`--client-key key.pem`, `--client-key-id`), `client_secret_jwt`, `tls` (with `--cert`), `none` (public client + PKCE) |
 | Login endpoint | `--login "POST /auth/login"` with `--username/--password` or `--login-body JSON`. The token in the response is found automatically (or set `--login-token-path $.data.token`, `--login-header`), or the session cookie it sets is kept |
 | Session cookie | `--cookie "sid=..."` |
 | Mutual TLS | `--cert`, `--cert-key`, `--ca-bundle` |
@@ -67,6 +69,29 @@ Each endpoint uses the scheme(s) its spec declares, including alternatives ("API
 - **OAuth tokens** are fetched, cached and renewed automatically: on expiry, or when the API answers 401. Renewal uses the refresh token after a password grant.
 - **Secrets from the environment:** any secret can be written as `env:VAR_NAME`, e.g. `--client-secret env:API_CLIENT_SECRET`, so it stays out of shell history and CI logs.
 - **Secrets never appear in reports:** authorization headers, cookies, API keys (including in query strings) and signatures are masked.
+
+#### PingFederate / PingOne (and other OIDC providers)
+
+`--issuer` discovers the token and authorization endpoints and the supported client authentication methods from `/.well-known/openid-configuration`. When PingFederate doesn't expose discovery, its standard paths `/as/token.oauth2` and `/as/authorization.oauth2` are used.
+
+```bash
+# client credentials with a signed JWT (private_key_jwt), as PingFederate is often configured
+python -m apisynth test https://api.example.com --issuer https://pf.example.com:9031 \
+  --client-id my-client --client-key client-key.pem --client-key-id my-key
+
+# client credentials with a secret (basic or post, whichever the provider supports)
+python -m apisynth test https://api.example.com --issuer https://pf.example.com:9031 \
+  --client-id my-client --client-secret env:PF_CLIENT_SECRET
+
+# authorization code + PKCE, logging in headlessly through the HTML Form Adapter (pf.username / pf.pass)
+python -m apisynth test https://api.example.com --issuer https://pf.example.com:9031 \
+  --client-id my-web-app --client-secret env:PF_CLIENT_SECRET --redirect-uri https://app.example.com/callback \
+  --username test.user --password env:PF_TEST_PASSWORD
+
+# PingOne: the issuer is https://auth.pingone.com/<environment-id>/as
+```
+
+For PingFederate's HTML Form Adapter, the agent also sets the hidden `pf.ok` field that the login page normally sets with JavaScript; without it, PingFederate ignores the submission. If a test user's login has MFA or a captcha, it can't be automated: get a token in a browser and pass `--token`, or use a client-credentials client for testing. Tokens are renewed with the refresh token after a user login.
 
 **Authentication is tested too.** Every endpoint the spec marks as secured is also called **with no credentials** and **with invalid credentials** (a wrong token, key, password or signature). If either succeeds, it's reported as **Authentication not enforced**:
 - the checks reuse a valid request that succeeded, so a refusal can only be about the credentials
