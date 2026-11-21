@@ -48,9 +48,18 @@ class Generator:
 
     # ------------------------------------------------------------- requests
 
-    def request(self, ep: Endpoint, full: bool = False) -> RequestData:
-        """One valid request. ``full=True`` includes every optional field/param
-        (used as the base for negative mutations)."""
+    def request(self, ep: Endpoint, full: bool = False, minimal: bool = False) -> RequestData:
+        """One valid request. ``full=True`` includes every optional field/param (also the base for
+        negative mutations); ``minimal=True`` includes only what is required."""
+        saved = self.optional_rate
+        if minimal:
+            self.optional_rate = 0.0
+        try:
+            return self._request(ep, full)
+        finally:
+            self.optional_rate = saved
+
+    def _request(self, ep: Endpoint, full: bool) -> RequestData:
         rd = RequestData(ep.method, ep.path)
         segs = [x for x in ep.path.split("/") if x and not x.startswith("{")]
         self._context = [segs[-1] if segs else ""]
@@ -71,8 +80,19 @@ class Generator:
         return rd
 
     def valid_cases(self, ep: Endpoint, count: int) -> List[Case]:
-        return [Case(id=f"valid-{i}", kind="valid", request=self.request(ep), expect="2xx",
-                     description="Valid request with synthetic data") for i in range(1, count + 1)]
+        """valid-1 = required fields only, valid-2 = every field, then random mixes. The first two make
+        every run cover optional fields being absent AND present, whatever the seed, so a bug like
+        "omitting an optional field crashes the API" is found consistently, not by chance."""
+        out = []
+        for i in range(1, count + 1):
+            if i == 1:
+                rd, desc = self.request(ep, minimal=True), "Valid request: required fields only"
+            elif i == 2:
+                rd, desc = self.request(ep, full=True), "Valid request: every optional field included"
+            else:
+                rd, desc = self.request(ep), "Valid request: random mix of optional fields"
+            out.append(Case(id=f"valid-{i}", kind="valid", request=rd, expect="2xx", description=desc))
+        return out
 
     # --------------------------------------------------------------- values
 

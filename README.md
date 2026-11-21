@@ -4,7 +4,7 @@ Generates **synthetic request data from your API definitions**. Point it at an O
 
 | Kind | What it is | Expected API response |
 |---|---|---|
-| **valid** | Realistic data that satisfies every rule in the schema | `2xx` |
+| **valid** | Realistic data that satisfies every rule in the schema. `valid-1` has only the required fields and `valid-2` has every field, on every run, so bugs triggered by an optional field being absent or present are found consistently. Later valid cases mix optional fields randomly | `2xx` |
 | **boundary** | Values exactly on a limit (`minLength`, `maximum`, `maxItems`, …) | `2xx` |
 | **invalid** | Each case breaks **exactly one** rule: missing required field, wrong type, null, bad enum, too short/long, pattern, format, out of range, not a multiple, too few/many items, duplicates, unknown property, missing/wrong body, bad parameters | `4xx` |
 | **hostile** *(opt-in)* | Schema-valid but nasty strings: SQL injection, XSS, unicode, path traversal | not `5xx` |

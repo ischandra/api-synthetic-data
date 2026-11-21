@@ -171,3 +171,17 @@ def test_examples_guide_but_do_not_freeze_values():
     assert len({b["name"] for b in bodies}) > 5                 # not every pet is "doggie"
     assert all(b["phone"].isdigit() for b in bodies)            # digits-only example shape is kept
     assert all(len(b["country"]) == 2 and b["country"].isupper() for b in bodies)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
+def test_every_run_covers_required_only_and_all_fields(seed):
+    """Coverage of optional fields must not depend on the seed."""
+    eps = {e.key: e for e in SPECS["shop-oas30"]()}
+    results, problems, _ = generate_cases([eps["POST /customers"], eps["GET /customers"]], Options(seed=seed, count=3))
+    assert problems == []
+    cust = {c.id: c for c in results[0][1]}
+    assert set(cust["valid-1"].request.body) == {"firstName", "lastName", "email", "address"}
+    assert set(cust["valid-1"].request.body["address"]) == {"line1", "city", "postalCode", "country"}
+    assert {"dateOfBirth", "status", "loyaltyPoints", "tags", "phone"} <= set(cust["valid-2"].request.body)
+    lst = {c.id: c for c in results[1][1]}
+    assert lst["valid-1"].request.query == {} and set(lst["valid-2"].request.query) == {"limit", "status", "q"}
