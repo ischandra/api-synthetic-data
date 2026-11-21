@@ -90,9 +90,10 @@ class Mutator:
         note = " (rule inferred from examples)" if ep.inferred else ""
 
         def emit(kind: str, category: str, target: str, desc: str, mutate: Callable[[RequestData], None]) -> None:
-            # Cases expected to SUCCEED get their own fresh data (same structure), so unique fields such as
-            # emails don't collide with each other (409 Conflict). Invalid cases reuse the base request.
-            rd = (self._fresh_like(ep, base) if kind != "invalid" else None) or copy.deepcopy(base)
+            # Every case gets its own fresh data (same structure), so unique fields such as emails never
+            # collide: otherwise an invalid case the API wrongly accepts would make later cases fail with
+            # 409 Conflict - a 4xx that hides further validation gaps.
+            rd = self._fresh_like(ep, base) or copy.deepcopy(base)
             mutate(rd)
             expect = {"invalid": "4xx", "boundary": "2xx", "hostile": "not 5xx"}[kind]
             prefix = "" if kind == "invalid" else f"{kind}:"

@@ -83,7 +83,7 @@ def infer_schema(samples: List[Any], name: Optional[str] = None, mark_server_fie
         schema = {"type": "array", "items": infer_schema(items, name, mark_server_fields, False) if items else {}}
     elif kind == "string":
         schema = {"type": "string"}
-        distinct = sorted(set(v for v in non_null if v != "__postman_variable__"))
+        distinct = sorted(set(v for v in non_null if "__postman_variable__" not in v))
         for fmt, rx in _FORMATS:
             if distinct and all(rx.match(v) for v in distinct):
                 schema["format"] = fmt

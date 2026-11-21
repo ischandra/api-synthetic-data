@@ -40,6 +40,9 @@ def test_postman_placeholders_become_valid_json():
     assert doc["email"] == "alex.doe@example.com" and doc["n"] == 42 and doc["ok"] == 0
     assert doc["msg"].startswith("Hi ") and doc["who"] == "user@example.com" and doc["x"] == "__postman_variable__"
     assert "examples" not in infer_schema([doc])["properties"]["x"]
+    mixed = json.loads(substitute_placeholders('{"name": "{{$randomFirstName}} {{$randomLastName}}", "t": "{{a}}-{{b}}"}'))
+    assert mixed["name"] == "Alex Doe"
+    assert "examples" not in infer_schema([mixed])["properties"]["t"]  # partial placeholders never become examples
 
 
 def test_postman_paths():

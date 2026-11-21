@@ -22,6 +22,12 @@ _DYNAMIC = {
     "$randomIP": "192.0.2.10", "$randomDatePast": "2023-05-01T10:00:00.000Z",
     "$randomDateFuture": "2027-05-01T10:00:00.000Z", "$randomDateRecent": "2024-01-01T10:00:00.000Z",
     "$randomLatitude": 40.7128, "$randomLongitude": -74.006,
+    "$randomFirstName": "Alex", "$randomLastName": "Doe", "$randomFullName": "Alex Doe", "$randomUserName": "alex.doe",
+    "$randomNamePrefix": "Dr.", "$randomPhoneNumber": "+1-202-555-0143", "$randomCompanyName": "Acme Ltd",
+    "$randomCity": "Springfield", "$randomCountry": "United States", "$randomCountryCode": "US",
+    "$randomStreetAddress": "12 Main St", "$randomJobTitle": "Engineer", "$randomWord": "sample",
+    "$randomWords": "sample words", "$randomLoremSentence": "Sample sentence.", "$randomColor": "teal",
+    "$randomCurrencyCode": "USD", "$randomProductName": "Steel Bottle", "$randomAlphaNumeric": "a",
 }
 
 

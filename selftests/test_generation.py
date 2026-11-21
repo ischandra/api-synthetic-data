@@ -147,3 +147,13 @@ def test_pinned_params_and_single_delete():
     swagger = SPECS["swagger2"]()
     assert all(len([c for c in cs if c.kind == "valid"]) <= 1 for ep, cs in generate_cases(swagger, Options(seed=1))[0]
                if ep.method == "DELETE")
+
+
+def test_every_case_has_its_own_unique_values():
+    """A shared email would let one accepted invalid case turn later ones into 409s, hiding gaps."""
+    eps = {e.key: e for e in SPECS["shop-oas30"]()}
+    results, _, _ = generate_cases([eps["POST /customers"]], Options(seed=8, count=3))
+    emails = [c.request.body.get("email") for c in results[0][1]
+              if c.request.has_body and isinstance(c.request.body, dict) and isinstance(c.request.body.get("email"), str)
+              and "@" in c.request.body["email"] and c.target != "body.email"]
+    assert len(emails) > 20 and len(set(emails)) == len(emails)
