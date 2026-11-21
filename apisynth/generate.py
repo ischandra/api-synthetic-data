@@ -228,14 +228,17 @@ class Generator:
         return v
 
     def _match_shape(self, v: str, examples: List[str], name: Optional[str]) -> Optional[str]:
-        """If every example has a distinctive shape (e.g. 2-letter code) the value must too."""
-        for shape in (r"[A-Z]{2}", r"[A-Z]{3}", r"[A-Z][A-Z0-9_]*", r"\d+", r"[a-z][a-z0-9_-]*"):
+        """If every example has a distinctive *code-like* shape (e.g. 2-letter code, digits only),
+        the value must have it too. A free-text example such as "doggie" is not a shape rule."""
+        shapes = [r"[A-Z]{2}", r"[A-Z]{3}", r"[A-Z][A-Z0-9_]*", r"\d+"]
+        if len(examples) >= 3:
+            shapes.append(r"[a-z][a-z0-9_-]*")
+        for shape in shapes:
             if all(re.fullmatch(shape, e) for e in examples):
-                if re.fullmatch(shape, v):
-                    return v
                 alt = self.sem.value_for(f"{name} code", "string")
-                if isinstance(alt, str) and re.fullmatch(shape, alt):
-                    return alt
+                for cand in (v, re.sub(r"\D", "", v) if shape == r"\d+" else None, alt):
+                    if isinstance(cand, str) and cand and re.fullmatch(shape, cand):
+                        return cand
                 return self.rng.choice(examples)
         return v
 

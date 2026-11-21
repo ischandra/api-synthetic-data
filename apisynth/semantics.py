@@ -116,6 +116,8 @@ class Semantics:
             return None
         if toks in (["name"], ["title"], ["display", "name"]) and json_type == "string" and context:
             ctx = " ".join(tokens(context))
+            if re.search(r"(^| )(pets?|animals?|dogs?|cats?|horses?|birds?)( |$)", ctx):
+                return self.f.first_name()
             if re.search(r"product|item|article|sku|catalog|inventory", ctx):
                 return f"{self.f.color_name()} {self.f.word().title()}"
             if re.search(r"compan|supplier|vendor|organi[sz]ation|org$|merchant|business|tenant|partner", ctx):

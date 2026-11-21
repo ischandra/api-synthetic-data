@@ -157,3 +157,17 @@ def test_every_case_has_its_own_unique_values():
               if c.request.has_body and isinstance(c.request.body, dict) and isinstance(c.request.body.get("email"), str)
               and "@" in c.request.body["email"] and c.target != "body.email"]
     assert len(emails) > 20 and len(set(emails)) == len(emails)
+
+
+def test_examples_guide_but_do_not_freeze_values():
+    from apisynth.model import Endpoint
+    spec = {"type": "object", "required": ["name", "phone", "country"], "properties": {
+        "name": {"type": "string", "example": "doggie"},
+        "phone": {"type": "string", "example": "12345"},
+        "country": {"type": "string", "example": "US"}}}
+    ep = Endpoint("POST", "/pet", "test", doc={}, body_schema=spec)
+    gen = Generator(seed=4)
+    bodies = [gen.request(ep).body for _ in range(10)]
+    assert len({b["name"] for b in bodies}) > 5                 # not every pet is "doggie"
+    assert all(b["phone"].isdigit() for b in bodies)            # digits-only example shape is kept
+    assert all(len(b["country"]) == 2 and b["country"].isupper() for b in bodies)
