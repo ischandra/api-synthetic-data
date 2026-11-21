@@ -58,6 +58,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     o.add_argument("--optional-rate", type=float, default=0.7, help="chance an optional field is included (0-1)")
     o.add_argument("--max-invalid", type=int, default=200, help="cap on invalid cases per endpoint")
     o.add_argument("--prefer-examples", action="store_true", help="use schema examples when present")
+    o.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
+                   help="pin a path/query/header parameter in every case except those testing it, "
+                        "e.g. --param userId=42 (the id of a record that exists)")
     o.add_argument("--methods", help="comma list, e.g. POST,PUT,PATCH (default: endpoints with body or params)")
     w = g.add_argument_group("output")
     w.add_argument("-o", "--out", default="synthetic-data", help="output directory (default synthetic-data/)")
@@ -111,7 +114,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error(f"unknown format(s) {bad}; choose from {', '.join(FORMATS)}")
     opts = Options(count=a.count, seed=a.seed, invalid=not a.no_invalid, boundary=not a.no_boundary,
                    hostile=a.hostile, optional_rate=a.optional_rate, max_invalid=a.max_invalid,
-                   prefer_examples=a.prefer_examples,
+                   prefer_examples=a.prefer_examples, params=_params(a.param, parser),
                    methods=[m.strip().upper() for m in a.methods.split(",")] if a.methods else None)
     results, problems, seed = generate_cases(eps, opts)
     if not results:
@@ -140,6 +143,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print("self-check: every case validates (or fails) against the schema as intended")
     return 0
+
+
+def _params(items: List[str], parser: argparse.ArgumentParser) -> dict:
+    out = {}
+    for item in items:
+        if "=" not in item:
+            parser.error(f"--param expects NAME=VALUE, got '{item}'")
+        k, v = item.split("=", 1)
+        try:
+            out[k.strip()] = json.loads(v)  # 42 -> int, true -> bool, "x" -> str
+        except ValueError:
+            out[k.strip()] = v
+    return out
 
 
 def _default_name(src: Sources) -> str:

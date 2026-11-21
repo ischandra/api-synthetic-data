@@ -63,12 +63,14 @@ class Options:
     optional_rate: float = 0.7
     max_invalid: int = 200
     prefer_examples: bool = False
+    params: Dict[str, object] = field(default_factory=dict)  # pinned parameter values, e.g. {"userId": 42}
     methods: Optional[List[str]] = None   # default: endpoints with a body or params
 
 
 def generate_cases(eps: List[Endpoint], opts: Options) -> Tuple[List[Tuple[Endpoint, List[Case]]], List[str], int]:
     """Returns ([(endpoint, cases)], verification problems, seed used)."""
-    gen = Generator(seed=opts.seed, optional_rate=opts.optional_rate, prefer_examples=opts.prefer_examples)
+    gen = Generator(seed=opts.seed, optional_rate=opts.optional_rate, prefer_examples=opts.prefer_examples,
+                    fixed_params=opts.params)
     mut = Mutator(gen, boundary=opts.boundary, hostile=opts.hostile, max_cases=opts.max_invalid)
     results = []
     problems: List[str] = []
@@ -77,10 +79,14 @@ def generate_cases(eps: List[Endpoint], opts: Options) -> Tuple[List[Tuple[Endpo
             continue
         if not opts.methods and ep.body_schema is None and not ep.params:
             continue  # nothing to generate (e.g. GET /health)
-        cases = gen.valid_cases(ep, opts.count)
+        # deleting the same resource repeatedly can only succeed once
+        cases = gen.valid_cases(ep, min(opts.count, 1) if ep.method == "DELETE" else opts.count)
         if opts.invalid or opts.boundary or opts.hostile:
             extra = mut.cases(ep)
-            cases += [c for c in extra if (c.kind == "invalid" and opts.invalid) or c.kind in ("boundary", "hostile")]
+            pinned = {f"{p.location}.{p.name}" for p in ep.params if p.name in opts.params}
+            cases += [c for c in extra if (c.kind == "invalid" and opts.invalid)
+                      # a pinned param means "only this value exists", so only its invalid cases vary it
+                      or (c.kind in ("boundary", "hostile") and c.target not in pinned)]
         problems += verify(ep, cases)
         results.append((ep, cases))
     return results, problems, gen.seed

@@ -33,7 +33,7 @@ class Generator:
     """Seeded generator: the same seed + inputs always produce the same data."""
 
     def __init__(self, seed: Optional[int] = None, optional_rate: float = 0.7, max_depth: int = 5,
-                 prefer_examples: bool = False):
+                 prefer_examples: bool = False, fixed_params: Optional[Dict[str, Any]] = None):
         self.seed = seed if seed is not None else random.SystemRandom().randint(1, 2**31 - 1)
         self.rng = random.Random(self.seed)
         self.fake = Faker()
@@ -43,6 +43,7 @@ class Generator:
         self.optional_rate = optional_rate
         self.max_depth = max_depth
         self.prefer_examples = prefer_examples
+        self.fixed_params = dict(fixed_params or {})  # e.g. {"userId": 42}: ids of records that really exist
         self._context: List[str] = []
 
     # ------------------------------------------------------------- requests
@@ -56,10 +57,13 @@ class Generator:
         for p in ep.params:
             if p.location == "header" and p.name.lower() in SKIP_HEADERS:
                 continue
-            include = p.location == "path" or p.required or full or self.rng.random() < self.optional_rate / 2
-            if not include:
-                continue
-            v = self.value(ep.doc, p.schema or {"type": "string"}, name=p.name, depth=1, full=full)
+            if p.name in self.fixed_params:
+                v = self.fixed_params[p.name]
+            else:
+                include = p.location == "path" or p.required or full or self.rng.random() < self.optional_rate / 2
+                if not include:
+                    continue
+                v = self.value(ep.doc, p.schema or {"type": "string"}, name=p.name, depth=1, full=full)
             {"path": rd.path_params, "query": rd.query, "header": rd.headers, "cookie": rd.headers}[p.location][p.name] = v
         if ep.body_schema is not None:
             rd.body = self.value(ep.doc, ep.body_schema, name=None, depth=0, full=full)

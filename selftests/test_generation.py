@@ -131,3 +131,19 @@ def test_realistic_semantics():
         assert len(b["address"]["country"]) == 2
         if b.get("phone"):
             assert b["phone"].startswith("+1") and "555" in b["phone"]
+
+
+def test_pinned_params_and_single_delete():
+    eps = SPECS["shop-oas30"]()
+    results, problems, _ = generate_cases(eps, Options(seed=3, count=4, params={"customerId": 7}))
+    assert problems == []
+    by_key = {ep.key: cases for ep, cases in results}
+    for c in by_key["GET /customers/{customerId}"]:
+        if c.kind in ("valid", "boundary") and c.target != "path.customerId":
+            assert c.request.path_params["customerId"] == 7
+    assert not [c for c in by_key["GET /customers/{customerId}"] if c.kind == "boundary" and c.target == "path.customerId"]
+    bad = [c for c in by_key["GET /customers/{customerId}"] if c.kind == "invalid"]
+    assert any(c.request.path_params["customerId"] != 7 for c in bad)  # the param's own rules still tested
+    swagger = SPECS["swagger2"]()
+    assert all(len([c for c in cs if c.kind == "valid"]) <= 1 for ep, cs in generate_cases(swagger, Options(seed=1))[0]
+               if ep.method == "DELETE")

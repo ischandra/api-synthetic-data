@@ -57,6 +57,7 @@ python -m apisynth generate --openapi spec.yaml \
   --seed 42                 # reproducible output (default: random, printed)
   --include "POST /orders*" --exclude "* /admin/*" --tag customers   # pick endpoints (glob or operationId)
   --methods POST,PUT,PATCH  # default: every endpoint that has a body or parameters
+  --param userId=42         # pin a parameter to a record that exists (repeatable); only its invalid cases vary it
   --hostile                 # add SQL-injection / XSS / unicode strings
   --no-invalid --no-boundary
   --optional-rate 0.7       # chance each optional field is included in valid data
@@ -117,6 +118,8 @@ Each endpoint and kind becomes a data-driven test, and any case your API handles
 **What to expect from the results:**
 - **An invalid case that gets a 2xx** is a validation gap in the API: it accepts data its own contract says is wrong.
 - **A hostile case that gets a 5xx** is a robustness bug.
+
+**Record IDs:** synthetic data can't know which records exist in your environment, so valid calls to endpoints like `GET /users/{userId}` would get 404. Pin those parameters to real records with `--param userId=42`. DELETE endpoints get one valid case, because a record can only be deleted once.
 
 **Unique fields:** valid data is new for every seed. If you re-send the *same* seed to an environment that keeps data, fields with uniqueness constraints (emails, SKUs) will get 409 Conflict. Use the default random seed per run, or reset the environment.
 
