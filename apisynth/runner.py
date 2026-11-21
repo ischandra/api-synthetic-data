@@ -23,25 +23,15 @@ from urllib.parse import urlsplit
 
 import requests
 
+from .auth import INVALID, SECRET_NAMES, AuthConfig, AuthError, AuthManager, Credentials, describe
 from .infer import extract_records
 from .model import Case, Endpoint, RequestData
 
 MODES = ("safe", "read", "all")
 READ_METHODS = ("GET", "HEAD", "OPTIONS")
 _PHASE = {"POST": 0, "GET": 1, "HEAD": 1, "OPTIONS": 1, "PUT": 2, "PATCH": 2, "DELETE": 3}
-BUG_CATEGORIES = ("server-error", "validation-gap", "valid-rejected")
+BUG_CATEGORIES = ("auth-bypass", "server-error", "validation-gap", "valid-rejected")
 _SECRET = re.compile(r"(?i)(authorization|cookie|token|secret|passw(or)?d|api[-_]?key|credential)")
-
-
-@dataclass
-class Credentials:
-    token: Optional[str] = None
-    api_key: Optional[str] = None
-    api_key_name: Optional[str] = None
-    basic: Optional[Tuple[str, str]] = None
-
-    def any(self) -> bool:
-        return bool(self.token or self.api_key or self.basic)
 
 
 @dataclass
@@ -77,8 +67,18 @@ def _collection(path: str, name: str) -> str:
     return path.split("/{" + name + "}", 1)[0] or "/"
 
 
-def _mask_headers(h: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: ("***" if _SECRET.search(k) else v) for k, v in h.items()}
+def _mask_headers(h: Dict[str, Any], extra: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    return {k: ("***" if _SECRET.search(k) or k.lower() in extra else v) for k, v in h.items()}
+
+
+def _mask_url(url: str, extra: Tuple[str, ...] = ()) -> str:
+    from urllib.parse import parse_qsl, urlencode, urlsplit as _split, urlunsplit
+    parts = _split(url)
+    if not parts.query:
+        return url
+    q = [(k, "***" if SECRET_NAMES.search(k) or k.lower() in extra else v)
+         for k, v in parse_qsl(parts.query, keep_blank_values=True)]
+    return urlunsplit(parts._replace(query=urlencode(q, safe="*")))
 
 
 class Unreachable(RuntimeError):
@@ -88,7 +88,7 @@ class Unreachable(RuntimeError):
 class Runner:
     def __init__(self, base_url: str, creds: Optional[Credentials] = None, headers: Optional[Dict[str, str]] = None,
                  mode: str = "safe", rps: float = 5.0, timeout: float = 30.0, pinned: Optional[Dict[str, Any]] = None,
-                 verify_tls: bool = True, progress: Optional[Callable[[str], None]] = None):
+                 verify_tls: bool = True, progress: Optional[Callable[[str], None]] = None, auth_tests: bool = True):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.base_url = base_url.rstrip("/")
@@ -103,11 +103,17 @@ class Runner:
         self.progress = progress or (lambda msg: None)
         self.created: Dict[str, List[Dict[str, Any]]] = {}     # collection path -> records this run created
         self.discovered: Dict[str, List[Dict[str, Any]]] = {}  # collection path -> records seen in GET responses
-        self.missing_credentials: set = set()
+        self.auth = AuthManager(self.creds, self.session, self.base_url, timeout, self.headers)
+        self.auth_tests = auth_tests
+        self._secret_names = tuple(n.lower() for n in (self.creds.api_key_name,) if n)
         self.requests_sent = 0
         self.responses = 0
         self._consecutive_errors = 0
         self._last = 0.0
+
+    @property
+    def missing_credentials(self) -> set:
+        return self.auth.missing
 
     # ----------------------------------------------------------------- public
 
@@ -115,7 +121,20 @@ class Runner:
         ordered = sorted(results, key=lambda r: (_PHASE.get(r[0].method, 1), r[0].path.count("{"), r[0].path))
         out: List[Outcome] = []
         for ep, cases in ordered:
-            ep_out = [self._run_case(ep, c) for c in self._ordered_cases(cases)]
+            check_auth = self.auth_tests and self.auth.requires_auth(ep.security)
+            ordered_cases = self._ordered_cases(cases)
+            valid = [c for c in ordered_cases if c.kind == "valid"]
+            ep_out: List[Outcome] = []
+            if check_auth and ep.method == "DELETE":   # check before the record is gone
+                ep_out += self._auth_tests(ep, valid[:1])
+                check_auth = False
+            valid_out = [self._run_case(ep, c) for c in valid]
+            ep_out += valid_out
+            if check_auth:
+                # reuse a request that really succeeded, so a refusal can only be about the credentials
+                ok = [c for c, o in zip(valid, valid_out) if o.verdict == "pass"]
+                ep_out += self._auth_tests(ep, ok[:1] or valid[:1])
+            ep_out += [self._run_case(ep, c) for c in ordered_cases if c.kind != "valid"]
             out += ep_out
             counts = {v: sum(1 for o in ep_out if o.verdict == v) for v in ("pass", "bug", "attention", "skip")}
             self.progress(f"  {ep.key:50} {counts['pass']:3} ok  {counts['bug']:3} bugs  "
@@ -131,6 +150,31 @@ class Runner:
     # -------------------------------------------------------------- per case
 
     def _run_case(self, ep: Endpoint, case: Case) -> Outcome:
+        rd = self._prepare(ep, case)
+        if isinstance(rd, Outcome):
+            return rd
+        try:
+            resp, req_info = self._send(ep, rd)
+            self._consecutive_errors = 0
+            self.responses += 1
+        except AuthError as e:
+            return Outcome(ep.key, case, "attention", "auth", detail=f"could not authenticate: {e}",
+                           request=self._describe(ep, rd))
+        except requests.RequestException as e:
+            self._consecutive_errors += 1
+            if self.responses == 0 and self._consecutive_errors >= 3:
+                raise Unreachable(f"Can't reach {self.base_url}: {type(e).__name__}: {e}") from e
+            return Outcome(ep.key, case, "attention", "request-error", detail=f"{type(e).__name__}: {e}",
+                           request=self._describe(ep, rd))
+        out = self._judge(ep, case, resp)
+        out.request = req_info
+        out.response = resp.text[:500]
+        if 200 <= resp.status_code < 300 and case.kind == "valid":
+            self._remember(ep, rd, resp)
+        return out
+
+    def _prepare(self, ep: Endpoint, case: Case):
+        """The request to send (path params resolved, safety rules applied) - or a skip Outcome."""
         writes = ep.method not in READ_METHODS
         if self.mode == "read" and writes:
             return Outcome(ep.key, case, "skip", "skipped", detail="read-only mode (--mode read)")
@@ -154,21 +198,45 @@ class Runner:
                 return Outcome(ep.key, case, "skip", "missing-data",
                                detail=f"{ep.method} identifies the record in the body; no record created by this run "
                                       f"to target (safe mode). Use --mode all to allow it")
-        try:
-            resp, req_info = self._send(ep, rd)
-            self._consecutive_errors = 0
-            self.responses += 1
-        except requests.RequestException as e:
-            self._consecutive_errors += 1
-            if self.responses == 0 and self._consecutive_errors >= 3:
-                raise Unreachable(f"Can't reach {self.base_url}: {type(e).__name__}: {e}") from e
-            return Outcome(ep.key, case, "attention", "request-error", detail=f"{type(e).__name__}: {e}",
-                           request=self._describe(ep, rd))
-        out = self._judge(ep, case, resp)
-        out.request = req_info
-        out.response = resp.text[:500]
-        if 200 <= resp.status_code < 300 and case.kind == "valid":
-            self._remember(ep, rd, resp)
+        return rd
+
+    # ------------------------------------------------- auth enforcement tests
+
+    def _auth_tests(self, ep: Endpoint, cases: List[Case]) -> List[Outcome]:
+        """A secured endpoint must refuse requests with no credentials and with invalid ones."""
+        base = cases[0] if cases else None
+        if base is None:
+            return []
+        variants = [("no-credentials", "a request with no credentials", True, False),
+                    ("invalid-credentials", "a request with invalid credentials", False, True)]
+        schemes = " or ".join(" + ".join(describe(x) for x in req) for req in (ep.security or []) if req)
+        out = []
+        for vid, desc, anonymous, corrupt in variants:
+            case = Case(id=f"auth:{vid}", kind="auth", request=base.request, expect="401/403", category="auth",
+                        target="auth", description=f"{desc} (endpoint requires {schemes})")
+            rd = self._prepare(ep, case)
+            if isinstance(rd, Outcome):
+                out.append(rd)
+                continue
+            try:
+                resp, info = self._send(ep, rd, anonymous=anonymous, corrupt=corrupt)
+            except requests.exceptions.SSLError:
+                out.append(Outcome(ep.key, case, "pass", "ok", detail="refused during the TLS handshake"))
+                continue
+            except requests.RequestException as e:
+                out.append(Outcome(ep.key, case, "attention", "request-error", detail=f"{type(e).__name__}: {e}"))
+                continue
+            s = resp.status_code
+            ms = round(resp.elapsed.total_seconds() * 1000)
+            if s >= 500:
+                o = Outcome(ep.key, case, "bug", "server-error", s, ms, f"{s} {resp.reason} for {desc}")
+            elif s >= 400 or 300 <= s < 400:
+                o = Outcome(ep.key, case, "pass", "ok", s, ms, f"refused with {s}")
+            else:
+                o = Outcome(ep.key, case, "bug", "auth-bypass", s, ms,
+                            f"{desc} was accepted with {s}: authentication is not enforced (spec requires {schemes})")
+            o.request, o.response = info, resp.text[:500]
+            out.append(o)
         return out
 
     def _resolve(self, ep: Endpoint, name: str, writes: bool) -> Tuple[Optional[Any], str]:
@@ -217,42 +285,40 @@ class Runner:
 
     # ---------------------------------------------------------------- HTTP
 
-    def _auth(self, ep: Endpoint, headers: Dict[str, str], query: Dict[str, Any]) -> Optional[Tuple[str, str]]:
-        c = self.creds
-        wanted = ep.auth
-        have = {"bearer": bool(c.token), "apikey": bool(c.api_key), "basic": bool(c.basic)}
-        if wanted and not have.get(wanted["type"]):
-            if c.any():  # the spec offers this scheme first, but use whatever credentials were given
-                wanted = None
-            else:
-                self.missing_credentials.add(wanted["type"])
-                return None
-        if wanted is None:
-            if c.token:
-                wanted = {"type": "bearer"}
-            elif c.api_key:
-                wanted = {"type": "apikey", "name": c.api_key_name or "X-API-Key", "in": "header"}
-            elif c.basic:
-                wanted = {"type": "basic"}
-            else:
-                return None
-        if wanted["type"] == "bearer":
-            headers.setdefault("Authorization", f"Bearer {c.token}")
-        elif wanted["type"] == "apikey":
-            name = c.api_key_name or wanted.get("name") or "X-API-Key"
-            (query if wanted.get("in") == "query" else headers).setdefault(name, c.api_key)
-        elif wanted["type"] == "basic":
-            return c.basic
-        return None
+    def _send(self, ep: Endpoint, rd: RequestData, anonymous: bool = False, corrupt: bool = False
+              ) -> Tuple[requests.Response, Dict[str, Any]]:
+        """``anonymous``: no credentials at all; ``corrupt``: wrong credentials (auth enforcement tests)."""
+        resp, info = self._send_once(ep, rd, anonymous, corrupt)
+        if resp.status_code == 401 and not (anonymous or corrupt) and self.auth.refreshable():
+            self.auth.invalidate()  # expired token / session: authenticate again and retry once
+            resp, info = self._send_once(ep, rd, anonymous, corrupt)
+        return resp, info
 
-    def _send(self, ep: Endpoint, rd: RequestData) -> Tuple[requests.Response, Dict[str, Any]]:
+    def _send_once(self, ep: Endpoint, rd: RequestData, anonymous: bool, corrupt: bool
+                   ) -> Tuple[requests.Response, Dict[str, Any]]:
         headers = {**self.headers, **{k: str(v) for k, v in rd.headers.items()}}
-        extra_query: Dict[str, Any] = {}
-        basic = self._auth(ep, headers, extra_query)
+        extra_query: Dict[str, str] = {}
+        auth_obj = None
+        session = self.session
+        if anonymous or corrupt:
+            # a clean session: no session cookies; keep the TLS client cert only for "invalid credentials"
+            session = requests.Session()
+            session.verify = self.session.verify
+            if corrupt:
+                session.cert = self.session.cert
+            headers = {k: v for k, v in headers.items() if not SECRET_NAMES.search(k)}
+        if not anonymous:
+            auth_obj, _ = self.auth.apply(ep.security, headers, extra_query, corrupt=corrupt)
         url = self.base_url + rd.url()
         if extra_query:
-            url += ("&" if "?" in url else "?") + "&".join(f"{k}={v}" for k, v in extra_query.items())
-        kwargs: Dict[str, Any] = {"headers": headers, "timeout": self.timeout, "auth": basic}
+            from urllib.parse import urlencode
+            url += ("&" if "?" in url else "?") + urlencode(extra_query)
+        kwargs: Dict[str, Any] = {"headers": headers, "timeout": self.timeout, "auth": auth_obj}
+        if session.verify is not True:
+            # requests lets REQUESTS_CA_BUNDLE override a session-level CA bundle; pass ours per request
+            kwargs["verify"] = session.verify
+        if anonymous or corrupt:
+            kwargs["allow_redirects"] = False  # a redirect to a login page is a refusal, not a bypass
         ct = ep.content_type or "application/json"
         if rd.has_body:
             if ct == "application/x-www-form-urlencoded" and isinstance(rd.body, dict):
@@ -265,18 +331,21 @@ class Runner:
             else:
                 headers.setdefault("Content-Type", ct)
                 kwargs["data"] = (rd.body if isinstance(rd.body, str) else json.dumps(rd.body)).encode()
-        resp = self._request(ep.method, url, kwargs)
-        info = {"method": ep.method, "url": url, "headers": _mask_headers(resp.request.headers),
-                "body": rd.body if rd.has_body else None}
+        resp = self._request(ep.method, url, kwargs, session)
+        secret_q = tuple(k.lower() for k in extra_query) + self._secret_names
+        info = {"method": ep.method, "url": _mask_url(url, secret_q),
+                "headers": _mask_headers(resp.request.headers, secret_q), "body": rd.body if rd.has_body else None}
         return resp, info
 
-    def _request(self, method: str, url: str, kwargs: Dict[str, Any]) -> requests.Response:
+    def _request(self, method: str, url: str, kwargs: Dict[str, Any],
+                 session: Optional[requests.Session] = None) -> requests.Response:
+        session = session or self.session
         for attempt in range(4):
             wait = self.min_interval - (time.monotonic() - self._last)
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
-            resp = self.session.request(method, url, **kwargs)
+            resp = session.request(method, url, **kwargs)
             self.requests_sent += 1
             if resp.status_code != 429 or attempt == 3:
                 return resp
@@ -285,7 +354,8 @@ class Runner:
         return resp
 
     def _describe(self, ep: Endpoint, rd: RequestData) -> Dict[str, Any]:
-        return {"method": ep.method, "url": self.base_url + rd.url(), "body": rd.body if rd.has_body else None}
+        return {"method": ep.method, "url": _mask_url(self.base_url + rd.url(), self._secret_names),
+                "body": rd.body if rd.has_body else None}
 
     # -------------------------------------------------------------- verdicts
 
@@ -297,9 +367,8 @@ class Runner:
             return Outcome(ep.key, case, verdict, category, s, ms, detail)
 
         if s in (401, 403):
-            need = f" (the spec asks for {', '.join(sorted(self.missing_credentials))} credentials)" \
-                if self.missing_credentials else ""
-            return o("attention", "auth", f"{s} {resp.reason}: not authorised{need}; pass --token / --api-key / --basic")
+            need = f" (the spec requires: {'; '.join(sorted(self.missing_credentials))})" if self.missing_credentials else ""
+            return o("attention", "auth", f"{s} {resp.reason}: not authorised{need}")
         if s == 429:
             return o("attention", "rate-limited", "429 Too Many Requests even after retries; lower --rps")
         if case.kind in ("valid", "boundary"):

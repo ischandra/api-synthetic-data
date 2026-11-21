@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from .runner import Outcome
 
 TITLES = OrderedDict([
+    ("auth-bypass", "Authentication not enforced"),
     ("server-error", "Server errors (5xx)"),
     ("validation-gap", "Validation gaps: invalid data accepted"),
     ("valid-rejected", "Valid data rejected"),

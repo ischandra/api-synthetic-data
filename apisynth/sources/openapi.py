@@ -93,23 +93,57 @@ def bundle_external_refs(raw: Dict[str, Any], src: str, headers: Optional[Dict[s
     return walk(raw, src, 0)
 
 
-def _auth_for(raw: Dict[str, Any], op: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """First usable security scheme of an operation (falls back to the global ``security``)."""
+_SWAGGER2_FLOWS = {"application": "clientCredentials", "password": "password", "accessCode": "authorizationCode",
+                   "implicit": "implicit"}
+
+
+def _scheme(name: str, sch: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalises an OpenAPI / Swagger security scheme."""
+    t = str(sch.get("type", "")).lower()
+    http = str(sch.get("scheme", "")).lower()
+    if str(sch.get("x-amazon-apigateway-authtype", "")).lower() == "awssigv4":
+        return {"name": name, "type": "awsv4"}
+    if t == "http":
+        if http in ("bearer", "basic", "digest"):
+            return {"name": name, "type": http, "format": sch.get("bearerFormat")}
+        return {"name": name, "type": f"http-{http}"}
+    if t == "basic":
+        return {"name": name, "type": "basic"}
+    if t == "apikey":
+        return {"name": name, "type": "apikey", "param": sch.get("name", "X-API-Key"), "in": sch.get("in", "header")}
+    if t == "oauth2":
+        flows = dict(sch.get("flows") or {})
+        if sch.get("flow"):  # Swagger 2
+            flows[_SWAGGER2_FLOWS.get(sch["flow"], sch["flow"])] = {"tokenUrl": sch.get("tokenUrl"),
+                                                                      "authorizationUrl": sch.get("authorizationUrl")}
+        return {"name": name, "type": "oauth2", "flows": flows}
+    if t == "openidconnect":
+        return {"name": name, "type": "openid", "url": sch.get("openIdConnectUrl")}
+    if t == "mutualtls":
+        return {"name": name, "type": "mtls"}
+    return {"name": name, "type": t or "unknown"}
+
+
+def _security_for(raw: Dict[str, Any], op: Dict[str, Any]) -> List[List[Dict[str, Any]]]:
+    """Alternatives (OR) of scheme lists (AND); [] = no authentication."""
     reqs = op["security"] if "security" in op else raw.get("security")
     if not reqs:
-        return None  # no security, or explicitly public (security: [])
+        return []
     schemes = (raw.get("components") or {}).get("securitySchemes") or raw.get("securityDefinitions") or {}
-    for req in reqs:
-        for name in req or {}:
-            sch = schemes.get(name) or {}
-            kind = str(sch.get("type", "")).lower()
-            scheme = str(sch.get("scheme", "")).lower()
-            if kind == "basic" or (kind == "http" and scheme == "basic"):
-                return {"type": "basic"}
-            if kind in ("oauth2", "openidconnect") or (kind == "http" and scheme == "bearer"):
+    return [[{**_scheme(n, schemes.get(n) or {}), "scopes": list(req[n] or [])} for n in (req or {})]
+            for req in reqs]
+
+
+def _simple_auth(security: List[List[Dict[str, Any]]]) -> Optional[Dict[str, str]]:
+    """First scheme, simplified for the apitest/postman exports."""
+    for req in security:
+        for s in req:
+            if s["type"] in ("bearer", "oauth2", "openid"):
                 return {"type": "bearer"}
-            if kind == "apikey" and sch.get("in") in ("header", "query"):
-                return {"type": "apikey", "name": sch.get("name", "X-API-Key"), "in": sch["in"]}
+            if s["type"] in ("basic", "digest"):
+                return {"type": "basic"}
+            if s["type"] == "apikey" and s.get("in") in ("header", "query"):
+                return {"type": "apikey", "name": s["param"], "in": s["in"]}
     return None
 
 
@@ -136,7 +170,8 @@ def load_openapi(src: str, headers: Optional[Dict[str, str]] = None,
                 continue
             ep = Endpoint(method=method.upper(), path=path, source=name, doc=doc,
                           operation_id=op.get("operationId"), summary=op.get("summary"), tags=list(op.get("tags") or []),
-                          auth=_auth_for(raw, op))
+                          security=_security_for(raw, op))
+            ep.auth = _simple_auth(ep.security)
             merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
             for p in list(common) + list(op.get("parameters") or []):
                 p = deref(doc, p)

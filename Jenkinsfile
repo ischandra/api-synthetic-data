@@ -34,12 +34,17 @@ pipeline {
         stage('Test API') {
             when { expression { params.API_URL?.trim() } }
             steps {
-                // credentials: define API_TOKEN / API_KEY in Jenkins (e.g. withCredentials) if the API needs them
+                // Credentials: bind them with withCredentials / credentials() as these environment variables.
+                // They are passed as env:NAME so the values never appear in the command line or the log.
                 sh '''
                     . .venv/bin/activate
                     ARGS=""
-                    [ -n "$API_TOKEN" ] && ARGS="$ARGS --token $API_TOKEN"
-                    [ -n "$API_KEY" ] && ARGS="$ARGS --api-key $API_KEY"
+                    [ -n "$API_TOKEN" ] && ARGS="$ARGS --token env:API_TOKEN"
+                    [ -n "$API_KEY" ] && ARGS="$ARGS --api-key env:API_KEY"
+                    [ -n "$API_BASIC" ] && ARGS="$ARGS --basic env:API_BASIC"
+                    [ -n "$API_CLIENT_ID" ] && ARGS="$ARGS --client-id env:API_CLIENT_ID --client-secret env:API_CLIENT_SECRET"
+                    [ -n "$API_TOKEN_URL" ] && ARGS="$ARGS --token-url $API_TOKEN_URL"
+                    [ -n "$API_EXTRA_ARGS" ] && ARGS="$ARGS $API_EXTRA_ARGS"
                     # exit 1 = bugs found: reported through junit (build UNSTABLE); exit 2 = error: fail the build
                     rc=0
                     python -m apisynth test "$API_URL" --mode "$MODE" --seed "${SEED:-$BUILD_NUMBER}" -o reports/api-test $ARGS || rc=$?

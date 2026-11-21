@@ -82,10 +82,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_sources(t)
     r = t.add_argument_group("calling the API")
     r.add_argument("--base-url", help="API base URL (default: from the spec, resolved against its location)")
-    r.add_argument("--token", help="bearer / OAuth2 access token")
-    r.add_argument("--api-key", help="API key value (header name from the spec, or --api-key-header)")
-    r.add_argument("--api-key-header", help="API key header name when the spec doesn't say (default X-API-Key)")
-    r.add_argument("--basic", metavar="USER:PASS", help="HTTP basic credentials")
+    au = t.add_argument_group(
+        "authentication",
+        "Each endpoint uses the scheme(s) its spec declares; with no security info, whatever you pass. Any secret "
+        "may be given as env:VAR_NAME (read from the environment) to keep it out of shell history and CI logs.")
+    au.add_argument("--token", help="bearer / JWT / OAuth2 access token")
+    au.add_argument("--api-key", help="API key value (name and header/query/cookie location from the spec)")
+    au.add_argument("--api-key-name", "--api-key-header", dest="api_key_name",
+                    help="API key name when the spec doesn't say (default X-API-Key)")
+    au.add_argument("--api-key-in", choices=["header", "query", "cookie"], help="where to send the API key")
+    au.add_argument("--basic", metavar="USER:PASS", help="HTTP basic auth")
+    au.add_argument("--digest", metavar="USER:PASS", help="HTTP digest auth")
+    au.add_argument("--client-id", help="OAuth2 client id (client_credentials grant, or with --username/--password)")
+    au.add_argument("--client-secret", help="OAuth2 client secret")
+    au.add_argument("--token-url", help="OAuth2 token endpoint (default: from the spec's flows / OpenID discovery)")
+    au.add_argument("--scope", help="OAuth2 scopes (default: the scopes the endpoint's security lists)")
+    au.add_argument("--audience", help="OAuth2 audience (Auth0, Okta and similar)")
+    au.add_argument("--username", help="password grant / login endpoint user")
+    au.add_argument("--password", help="password grant / login endpoint password")
+    au.add_argument("--refresh-token", help="OAuth2 refresh token (refresh_token grant)")
+    au.add_argument("--client-auth", choices=["basic", "body"], default="basic",
+                    help="how client credentials are sent to the token endpoint (default basic)")
+    au.add_argument("--login", metavar="'POST /auth/login'",
+                    help="log in through an endpoint first; its token (or session cookie) is used for every call")
+    au.add_argument("--login-body", metavar="JSON", help='login request body (default {"username":..,"password":..})')
+    au.add_argument("--login-token-path", metavar="$.data.token", help="where the token is in the login response")
+    au.add_argument("--login-header", default="Authorization: Bearer {token}",
+                    help="how the login token is sent (default 'Authorization: Bearer {token}')")
+    au.add_argument("--cookie", help="session cookie(s), e.g. 'sid=abc; csrftoken=xyz'")
+    au.add_argument("--cert", help="client certificate for mutual TLS (PEM; may include the key)")
+    au.add_argument("--cert-key", help="private key for --cert")
+    au.add_argument("--ca-bundle", help="CA bundle to verify the API's certificate")
+    au.add_argument("--aws-sigv4", metavar="REGION/SERVICE",
+                    help="sign requests with AWS Signature V4, e.g. us-east-1/execute-api")
+    au.add_argument("--aws-access-key", help="default: AWS_ACCESS_KEY_ID")
+    au.add_argument("--aws-secret-key", help="default: AWS_SECRET_ACCESS_KEY")
+    au.add_argument("--aws-session-token", help="default: AWS_SESSION_TOKEN")
+    au.add_argument("--no-auth-tests", action="store_true",
+                    help="don't check that secured endpoints refuse missing/invalid credentials")
     r.add_argument("--mode", choices=["safe", "read", "all"], default="safe",
                    help="safe (default): PUT/PATCH/DELETE only on records this run created; read: GET only; "
                         "all: may change existing records")
@@ -104,7 +138,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     tg.add_argument("--max-invalid", type=int, default=40, help="cap on invalid cases per endpoint (default 40)")
     rp = t.add_argument_group("report")
     rp.add_argument("-o", "--out", default="api-test-report", help="report directory (default api-test-report/)")
-    rp.add_argument("--fail-on", default="server-error,validation-gap,valid-rejected",
+    rp.add_argument("--fail-on", default="auth-bypass,server-error,validation-gap,valid-rejected",
                     help="bug categories that make the exit code 1 (comma list, or 'none')")
     rp.add_argument("-q", "--quiet", action="store_true", help="no per-endpoint progress")
 
@@ -190,7 +224,7 @@ def _test(a: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     from .core import select as select_eps
     from .fetch import discover, is_url
     from .report import console, totals, write_reports
-    from .runner import BUG_CATEGORIES, Credentials, Runner, Unreachable
+    from .runner import BUG_CATEGORIES, Runner, Unreachable
     from .sources.openapi import load_openapi
     from .sources.postman import load_postman
 
@@ -201,8 +235,10 @@ def _test(a: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     eps, spec_base = [], None
     spec_label = []
     try:
+        tls = {"verify": False if a.insecure else (a.ca_bundle or True),
+               "cert": (a.cert, a.cert_key) if a.cert and a.cert_key else a.cert}
         for target in a.targets:
-            kind, location, doc = discover(target, src.headers)
+            kind, location, doc = discover(target, src.headers, **tls)
             say(f"Found {kind} description: {location}")
             spec_label.append(location)
             if kind == "openapi":
@@ -245,10 +281,12 @@ def _test(a: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if problems:
         say(f"warning: self-check found {len(problems)} generated case(s) that don't match the schema as intended")
 
-    basic = tuple(a.basic.split(":", 1)) if a.basic and ":" in a.basic else None
-    creds = Credentials(token=a.token, api_key=a.api_key, api_key_name=a.api_key_header, basic=basic)
+    try:
+        creds = _auth_config(a)
+    except ValueError as ex:
+        parser.error(str(ex))
     runner = Runner(base_url, creds, headers=src.headers, mode=a.mode, rps=a.rps, timeout=a.timeout,
-                    pinned=params, verify_tls=not a.insecure, progress=say)
+                    pinned=params, verify_tls=not a.insecure, progress=say, auth_tests=not a.no_auth_tests)
     started = time.time()
     try:
         outcomes = runner.run(results)
@@ -260,8 +298,9 @@ def _test(a: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     hints = []
     t = totals(outcomes)
     if runner.missing_credentials:
-        hints.append(f"The spec asks for {', '.join(sorted(runner.missing_credentials))} credentials that weren't "
-                     f"given; protected endpoints may only show 401/403. Pass --token / --api-key / --basic.")
+        hints.append(f"The spec requires credentials that weren't given ({'; '.join(sorted(runner.missing_credentials))}), "
+                     f"so protected endpoints can only show 401/403. See 'python -m apisynth test --help' "
+                     f"(authentication) for the matching options.")
     if any(o.category == "missing-data" for o in outcomes):
         hints.append("Some cases were skipped because no suitable record existed; --param NAME=VALUE supplies one.")
     meta = {"title": (doc.get("info") or {}).get("title") if a.targets and isinstance(doc, dict) else "API",
@@ -277,6 +316,39 @@ def _test(a: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if unknown:
         parser.error(f"unknown --fail-on categories {sorted(unknown)}; choose from {', '.join(BUG_CATEGORIES)}")
     return 1 if any(o.verdict == "bug" and o.category in fail_on for o in outcomes) else 0
+
+
+def _auth_config(a: argparse.Namespace):
+    import os
+
+    from .auth import AuthConfig, pair, secret
+    region = service = None
+    if a.aws_sigv4:
+        region, _, service = a.aws_sigv4.partition("/")
+        if not service:
+            raise ValueError("--aws-sigv4 expects REGION/SERVICE, e.g. us-east-1/execute-api")
+    for f in ("cert", "cert_key", "ca_bundle"):
+        v = getattr(a, f)
+        if v and not Path(v).is_file():
+            raise ValueError(f"--{f.replace('_', '-')}: file not found: {v}")
+    if a.login_body:
+        try:
+            json.loads(secret(a.login_body))
+        except ValueError as e:
+            raise ValueError(f"--login-body is not valid JSON: {e}")
+    return AuthConfig(
+        token=secret(a.token), api_key=secret(a.api_key), api_key_name=a.api_key_name, api_key_in=a.api_key_in,
+        basic=pair(a.basic, "--basic"), digest=pair(a.digest, "--digest"),
+        token_url=a.token_url, client_id=secret(a.client_id), client_secret=secret(a.client_secret), scope=a.scope,
+        audience=a.audience, username=secret(a.username), password=secret(a.password),
+        refresh_token=secret(a.refresh_token), client_auth=a.client_auth,
+        login=a.login, login_body=secret(a.login_body), login_token_path=a.login_token_path,
+        login_header=a.login_header, cookie=secret(a.cookie),
+        cert=a.cert, cert_key=a.cert_key, ca_bundle=a.ca_bundle,
+        aws_region=region, aws_service=service,
+        aws_access_key=secret(a.aws_access_key) or (os.environ.get("AWS_ACCESS_KEY_ID") if region else None),
+        aws_secret_key=secret(a.aws_secret_key) or (os.environ.get("AWS_SECRET_ACCESS_KEY") if region else None),
+        aws_session_token=secret(a.aws_session_token) or (os.environ.get("AWS_SESSION_TOKEN") if region else None))
 
 
 def _params(items: List[str], parser: argparse.ArgumentParser) -> dict:

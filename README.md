@@ -31,6 +31,7 @@ Give it the API's base URL, its spec or Swagger UI URL, a Postman collection, or
 
 | Verdict | Meaning |
 |---|---|
+| **Authentication not enforced** | a secured endpoint accepted a request with no or invalid credentials |
 | **Server error** | 5xx for valid or invalid input |
 | **Validation gap** | invalid data accepted (2xx) |
 | **Valid data rejected** | 4xx for data the spec allows |
@@ -43,7 +44,36 @@ Give it the API's base URL, its spec or Swagger UI URL, a Postman collection, or
 - **No hostile strings by default:** SQL-injection/XSS cases are only sent with `--hostile`, for APIs you're allowed to security-test.
 - **Other modes:** `--mode read` sends only GETs. `--mode all` may change existing records; use it on your own test environment.
 
-**Credentials:** `--token` (bearer/OAuth2), `--api-key` (header name from the spec, or `--api-key-header`), `--basic user:pass`, or any header with `-H`. Each request uses the scheme the spec gives it.
+### Authentication
+
+Each endpoint uses the scheme(s) its spec declares, including alternatives ("API key **or** OAuth") and combinations ("API key **and** bearer"); the agent picks the alternative you have credentials for. Endpoints with no security info (Postman without auth, live URLs) get whatever you pass.
+
+| Scheme | Options |
+|---|---|
+| Bearer / JWT | `--token` |
+| API key in header, query or cookie | `--api-key` (name and location from the spec; `--api-key-name`, `--api-key-in` to override) |
+| HTTP Basic / Digest | `--basic USER:PASS`, `--digest USER:PASS` |
+| OAuth 2.0 client credentials | `--client-id`, `--client-secret` (token URL and scopes from the spec, or `--token-url`, `--scope`, `--audience`) |
+| OAuth 2.0 password grant | `--username`, `--password` (+ client id/secret if the server needs them) |
+| OAuth 2.0 refresh token | `--refresh-token` |
+| OAuth 2.0 authorization code / implicit | these need a browser login: get a token there and pass `--token` |
+| OpenID Connect | as OAuth: the token endpoint is discovered from the spec's `openIdConnectUrl` |
+| Login endpoint | `--login "POST /auth/login"` with `--username/--password` or `--login-body JSON`. The token in the response is found automatically (or set `--login-token-path $.data.token`, `--login-header`), or the session cookie it sets is kept |
+| Session cookie | `--cookie "sid=..."` |
+| Mutual TLS | `--cert`, `--cert-key`, `--ca-bundle` |
+| AWS Signature V4 | `--aws-sigv4 us-east-1/execute-api` with `--aws-access-key/--aws-secret-key/--aws-session-token` or the standard `AWS_*` variables |
+| Anything else | `-H "Name: value"` |
+
+- **OAuth tokens** are fetched, cached and renewed automatically: on expiry, or when the API answers 401. Renewal uses the refresh token after a password grant.
+- **Secrets from the environment:** any secret can be written as `env:VAR_NAME`, e.g. `--client-secret env:API_CLIENT_SECRET`, so it stays out of shell history and CI logs.
+- **Secrets never appear in reports:** authorization headers, cookies, API keys (including in query strings) and signatures are masked.
+
+**Authentication is tested too.** Every endpoint the spec marks as secured is also called **with no credentials** and **with invalid credentials** (a wrong token, key, password or signature). If either succeeds, it's reported as **Authentication not enforced**:
+- the checks reuse a valid request that succeeded, so a refusal can only be about the credentials
+- for DELETE, the checks run while the record still exists
+- turn them off with `--no-auth-tests`
+
+Against the public Petstore, this found that none of the secured pet endpoints enforce their declared API key / OAuth2.
 
 **Records it can't create:** `--param username=user1` tells it which existing record to use.
 

@@ -44,9 +44,13 @@ def test_without_credentials_reports_auth_not_bugs(tmp_path, widget_api):
     origin, _ = widget_api
     code, rep, _ = run_test(tmp_path, origin + "/openapi.json", "--seed", "3")
     res = rep["results"]
-    posts = [r for r in res if r["endpoint"] == "POST /widgets"]
+    posts = [r for r in res if r["endpoint"] == "POST /widgets" and r["kind"] != "auth"]
     assert posts and all(r["category"] in ("auth", "skipped") for r in posts)
-    assert any("bearer credentials" in h for h in rep["meta"]["hints"])
+    # the API does enforce auth, so the enforcement checks pass
+    checks = [r for r in res if r["endpoint"] == "POST /widgets" and r["kind"] == "auth"]
+    assert {r["case"] for r in checks} == {"auth:no-credentials", "auth:invalid-credentials"}
+    assert all(r["verdict"] == "pass" and r["status"] == 401 for r in checks)
+    assert any("bearer token" in h for h in rep["meta"]["hints"])
     assert code == 0  # nothing that could be judged was a bug
 
 

@@ -58,7 +58,8 @@ def kind_of(doc: Any) -> Optional[str]:
     return None
 
 
-def discover(target: str, headers: Optional[Dict[str, str]] = None, timeout: float = 15) -> Tuple[str, str, Any]:
+def discover(target: str, headers: Optional[Dict[str, str]] = None, timeout: float = 15,
+             verify: Any = True, cert: Any = None) -> Tuple[str, str, Any]:
     """Finds an API description from whatever the user passed: a spec/collection file or URL, a Swagger UI
     page, or just the API's base URL. Returns (kind, location, document)."""
     import requests
@@ -78,7 +79,7 @@ def discover(target: str, headers: Optional[Dict[str, str]] = None, timeout: flo
             return None
         tried.append(url)
         try:
-            r = requests.get(url, headers=headers or {}, timeout=timeout)
+            r = requests.get(url, headers=headers or {}, timeout=timeout, verify=verify, cert=cert)
         except requests.RequestException:
             return None
         if r.status_code >= 400 or not r.content:

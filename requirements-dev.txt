@@ -1,0 +1,2 @@
+# test-only: cross-checks the AWS SigV4 signer against AWS's own implementation
+botocore>=1.31

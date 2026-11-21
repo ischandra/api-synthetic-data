@@ -29,7 +29,9 @@ class Endpoint:
     tags: List[str] = field(default_factory=list)
     inferred: bool = False           # schema guessed from examples rather than declared
     body_pointer: Optional[str] = None  # JSON pointer of the body schema inside doc (for validation)
-    auth: Optional[Dict[str, str]] = None  # from the spec's security: {"type": "bearer"|"basic"|"apikey", ...}
+    auth: Optional[Dict[str, str]] = None  # first scheme, simplified (for apitest/postman exports)
+    # Full security requirements: alternatives (OR) of scheme lists (AND). None = unknown, [] = no auth.
+    security: Optional[List[List[Dict[str, Any]]]] = None
 
     @property
     def key(self) -> str:

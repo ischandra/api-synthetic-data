@@ -134,6 +134,38 @@ def _param_schema(sample: Any, name: str) -> Dict[str, Any]:
     return {"type": "string"}
 
 
+def _kv(entries: Any) -> Dict[str, Any]:
+    if isinstance(entries, dict):
+        return entries
+    return {e.get("key"): e.get("value") for e in entries or [] if isinstance(e, dict)}
+
+
+def postman_security(auth: Any) -> Optional[List[List[Dict[str, Any]]]]:
+    """Postman auth -> the same security model as OpenAPI (None = no auth configured anywhere)."""
+    if not isinstance(auth, dict) or not auth.get("type"):
+        return None
+    kind = auth["type"].lower()
+    p = _kv(auth.get(auth["type"]))
+    if kind == "noauth":
+        return []
+    if kind in ("bearer", "jwt"):
+        return [[{"type": "bearer"}]]
+    if kind in ("basic", "digest"):
+        return [[{"type": kind}]]
+    if kind == "apikey":
+        return [[{"type": "apikey", "param": p.get("key") or "X-API-Key", "in": p.get("in") or "header"}]]
+    if kind == "oauth2":
+        grant = {"client_credentials": "clientCredentials", "password_credentials": "password",
+                 "authorization_code": "authorizationCode", "implicit": "implicit"}.get(p.get("grant_type"), "clientCredentials")
+        token_url = p.get("accessTokenUrl")
+        flows = {grant: {"tokenUrl": token_url}} if token_url and "{{" not in str(token_url) else {grant: {}}
+        scopes = str(p.get("scope") or "").split()
+        return [[{"type": "oauth2", "flows": flows, "scopes": scopes}]]
+    if kind == "awsv4":
+        return [[{"type": "awsv4"}]]
+    return [[{"type": kind}]]  # ntlm, hawk, edgegrid, ...: satisfied only by a custom -H header
+
+
 def load_postman(src: str, headers: Optional[Dict[str, str]] = None) -> List[Endpoint]:
     doc = load_document(src, headers)
     if isinstance(doc, dict) and "collection" in doc and "item" not in doc:
@@ -143,19 +175,21 @@ def load_postman(src: str, headers: Optional[Dict[str, str]] = None) -> List[End
     name = f"postman:{source_name(src)}"
     groups: Dict[str, Dict[str, Any]] = {}
 
-    def walk(items: List[Dict[str, Any]], folder: List[str]) -> None:
+    def walk(items: List[Dict[str, Any]], folder: List[str], inherited: Any) -> None:
         for it in items:
             if "item" in it:
-                walk(it["item"], folder + [it.get("name", "")])
+                walk(it["item"], folder + [it.get("name", "")], it.get("auth", inherited))
                 continue
             req = it.get("request") or {}
             if isinstance(req, str):
                 req = {"method": "GET", "url": req}
+            auth = req.get("auth", inherited)
             method = str(req.get("method", "GET")).upper()
             path, pparams, query = _path(req.get("url"))
             g = groups.setdefault(f"{method} {path}", {"method": method, "path": path, "params": {}, "query": {},
                                                       "bodies": [], "content_type": "application/json",
-                                                      "summary": it.get("name"), "tags": folder[-1:] if folder else []})
+                                                      "summary": it.get("name"), "tags": folder[-1:] if folder else [],
+                                                      "security": postman_security(auth)})
             for p in pparams:
                 g["params"][p.name] = p
             for k, v in query.items():
@@ -175,12 +209,13 @@ def load_postman(src: str, headers: Optional[Dict[str, str]] = None) -> List[End
             elif mode == "graphql":
                 g["bodies"].append({"query": (body.get("graphql") or {}).get("query", ""), "variables": {}})
 
-    walk(doc["item"], [])
+    walk(doc["item"], [], doc.get("auth"))
     endpoints = []
     for g in groups.values():
         ep = Endpoint(method=g["method"], path=g["path"], source=name, doc={}, summary=g["summary"],
                       tags=g["tags"], inferred=True, content_type=g["content_type"])
         ep.params = list(g["params"].values())
+        ep.security = g["security"]
         for k, values in g["query"].items():
             sample = next((v for v in values if v not in (None, "")), None)
             ep.params.append(Param(k, "query", False, _param_schema(sample, k)))
