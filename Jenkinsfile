@@ -4,6 +4,8 @@ pipeline {
     agent any
 
     parameters {
+        string(name: 'API_URL', defaultValue: '', description: 'Test this API end to end (base URL, spec or Swagger UI URL). Empty: only generate data from SPEC')
+        choice(name: 'MODE', choices: ['safe', 'read', 'all'], description: 'safe: change only records the run created; read: GET only; all: anything')
         string(name: 'SPEC', defaultValue: 'examples/shop-api.openapi.yaml', description: 'OpenAPI file or URL')
         string(name: 'POSTMAN', defaultValue: '', description: 'Optional Postman collection file or URL')
         string(name: 'COUNT', defaultValue: '5', description: 'Valid requests per endpoint')
@@ -29,6 +31,22 @@ pipeline {
                 sh '. .venv/bin/activate && pytest -q --junitxml=reports/selftests.xml'
             }
         }
+        stage('Test API') {
+            when { expression { params.API_URL?.trim() } }
+            steps {
+                // credentials: define API_TOKEN / API_KEY in Jenkins (e.g. withCredentials) if the API needs them
+                sh '''
+                    . .venv/bin/activate
+                    ARGS=""
+                    [ -n "$API_TOKEN" ] && ARGS="$ARGS --token $API_TOKEN"
+                    [ -n "$API_KEY" ] && ARGS="$ARGS --api-key $API_KEY"
+                    # exit 1 = bugs found: reported through junit (build UNSTABLE); exit 2 = error: fail the build
+                    rc=0
+                    python -m apisynth test "$API_URL" --mode "$MODE" --seed "${SEED:-$BUILD_NUMBER}" -o reports/api-test $ARGS || rc=$?
+                    [ "$rc" -le 1 ]
+                '''
+            }
+        }
         stage('Generate') {
             steps {
                 // parameters are read as shell variables (not Groovy-interpolated)
@@ -46,8 +64,8 @@ pipeline {
 
     post {
         always {
-            junit allowEmptyResults: true, testResults: 'reports/*.xml'
-            archiveArtifacts artifacts: 'synthetic-data/**', allowEmptyArchive: true
+            junit allowEmptyResults: true, testResults: 'reports/**/*.xml'
+            archiveArtifacts artifacts: 'synthetic-data/**, reports/**', allowEmptyArchive: true
         }
     }
 }

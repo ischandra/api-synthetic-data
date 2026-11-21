@@ -16,6 +16,39 @@ pip install -r requirements.txt
 python -m apisynth generate --openapi https://api.example.com/v3/api-docs -o synthetic-data
 ```
 
+## Test any API in one command
+
+```bash
+python -m apisynth test https://petstore3.swagger.io --api-key special-key
+```
+
+Give it the API's base URL, its spec or Swagger UI URL, a Postman collection, or a spec file. It does the rest:
+
+1. **Finds the spec:** it tries the given URL, links on a Swagger UI/Redoc page, then common locations (`/openapi.json`, `/v3/api-docs`, `/swagger.json`, `/api/v3/openapi.json`, …). `$ref`s into other files or URLs are followed.
+2. **Works out the base URL** from the spec. Relative `servers` such as `/api/v3` are resolved against where the spec came from. `--base-url` overrides it.
+3. **Generates the cases** (valid, boundary and invalid) and calls the API, creating records first and then reusing their real IDs for `GET /pets/{petId}`, `PUT` and `DELETE`.
+4. **Reports** in the console, `report.md`, `report.json` and `junit.xml` (in `api-test-report/`), and exits 1 if it found bugs.
+
+| Verdict | Meaning |
+|---|---|
+| **Server error** | 5xx for valid or invalid input |
+| **Validation gap** | invalid data accepted (2xx) |
+| **Valid data rejected** | 4xx for data the spec allows |
+| **Needs attention** (not bugs) | 401/403 (credentials), 404 for a valid request (record missing), 429, network errors |
+| **Skipped** | no suitable record to use, or not allowed by the mode |
+
+**Safe on APIs you don't own** (default `--mode safe`):
+- **Only its own records:** PUT/PATCH/DELETE, and POSTs to an existing record's sub-path, touch only records **this run created**. Updates that name the record in the body (e.g. `PUT /pet {"id": …}`) are aimed at those records too.
+- **Polite:** requests are rate-limited (`--rps 5`), and 429 responses are retried, honouring `Retry-After`.
+- **No hostile strings by default:** SQL-injection/XSS cases are only sent with `--hostile`, for APIs you're allowed to security-test.
+- **Other modes:** `--mode read` sends only GETs. `--mode all` may change existing records; use it on your own test environment.
+
+**Credentials:** `--token` (bearer/OAuth2), `--api-key` (header name from the spec, or `--api-key-header`), `--basic user:pass`, or any header with `-H`. Each request uses the scheme the spec gives it.
+
+**Records it can't create:** `--param username=user1` tells it which existing record to use.
+
+**Consistent results:** every run includes a "required fields only" and an "every field" valid case, so findings don't depend on the random seed. Two runs against the Petstore with different seeds gave the same verdict for 205 of 207 cases. Add `--seed N` for byte-identical data.
+
 ## Sources
 
 Any combination of sources works, and each option can be repeated.

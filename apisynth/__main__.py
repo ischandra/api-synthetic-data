@@ -1,5 +1,6 @@
 """Command line: ``python -m apisynth <command>``
 
+  test       Test any API end to end: find its spec, generate data, call it, report bugs
   generate   Generate synthetic request data (valid, boundary, invalid, hostile)
   endpoints  List the endpoints found in the sources
   infer      Print the JSON Schema inferred from live URLs / sample files
@@ -72,6 +73,41 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "basic, apikey:<Header-Name>. Credentials stay variables ({{token}}, {{username}}...)")
     w.add_argument("--strict", action="store_true", help="exit 1 if the self-check finds any problem")
 
+    t = sub.add_parser("test", help="test any API end to end: find its spec, generate data, call it, report",
+                       description="Point it at an API: its base URL, a spec/Swagger UI URL, a Postman collection, "
+                                   "or a file. It finds the spec, generates valid/boundary/invalid data, calls the "
+                                   "API and reports bugs. Safe by default: never changes records it didn't create.")
+    t.add_argument("targets", nargs="*", metavar="URL|FILE",
+                   help="API base URL, spec or Swagger UI URL, Postman collection, or spec file")
+    _add_sources(t)
+    r = t.add_argument_group("calling the API")
+    r.add_argument("--base-url", help="API base URL (default: from the spec, resolved against its location)")
+    r.add_argument("--token", help="bearer / OAuth2 access token")
+    r.add_argument("--api-key", help="API key value (header name from the spec, or --api-key-header)")
+    r.add_argument("--api-key-header", help="API key header name when the spec doesn't say (default X-API-Key)")
+    r.add_argument("--basic", metavar="USER:PASS", help="HTTP basic credentials")
+    r.add_argument("--mode", choices=["safe", "read", "all"], default="safe",
+                   help="safe (default): PUT/PATCH/DELETE only on records this run created; read: GET only; "
+                        "all: may change existing records")
+    r.add_argument("--rps", type=float, default=5.0, help="max requests per second (default 5)")
+    r.add_argument("--timeout", type=float, default=30.0, help="per-request timeout in seconds")
+    r.add_argument("--insecure", action="store_true", help="don't verify TLS certificates")
+    r.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
+                   help="use this value for a path/query parameter, e.g. --param userId=42")
+    tg = t.add_argument_group("test data")
+    tg.add_argument("-n", "--count", type=int, default=3, help="valid requests per endpoint (default 3)")
+    tg.add_argument("--seed", type=int, help="seed for reproducible data (default: random, printed)")
+    tg.add_argument("--hostile", action="store_true", help="also send SQL-injection/XSS/unicode strings "
+                                                           "(only on APIs you're allowed to security-test)")
+    tg.add_argument("--no-invalid", action="store_true")
+    tg.add_argument("--no-boundary", action="store_true")
+    tg.add_argument("--max-invalid", type=int, default=40, help="cap on invalid cases per endpoint (default 40)")
+    rp = t.add_argument_group("report")
+    rp.add_argument("-o", "--out", default="api-test-report", help="report directory (default api-test-report/)")
+    rp.add_argument("--fail-on", default="server-error,validation-gap,valid-rejected",
+                    help="bug categories that make the exit code 1 (comma list, or 'none')")
+    rp.add_argument("-q", "--quiet", action="store_true", help="no per-endpoint progress")
+
     e = sub.add_parser("endpoints", help="list endpoints found in the sources")
     _add_sources(e)
 
@@ -79,6 +115,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     _add_sources(i)
 
     a = parser.parse_args(argv)
+    if a.cmd == "test":
+        return _test(a, parser)
     src = _sources(a)
     if src.empty():
         parser.error("give at least one source: --openapi, --postman, --url or --sample")
@@ -143,6 +181,102 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print("self-check: every case validates (or fails) against the schema as intended")
     return 0
+
+
+def _test(a: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    import time
+    from datetime import datetime, timezone
+
+    from .core import select as select_eps
+    from .fetch import discover, is_url
+    from .report import console, totals, write_reports
+    from .runner import BUG_CATEGORIES, Credentials, Runner, Unreachable
+    from .sources.openapi import load_openapi
+    from .sources.postman import load_postman
+
+    say = (lambda m: None) if a.quiet else (lambda m: print(m, flush=True))
+    src = _sources(a)
+    if not a.targets and src.empty():
+        parser.error("give the API to test: a base URL, spec URL, Postman collection or file")
+    eps, spec_base = [], None
+    spec_label = []
+    try:
+        for target in a.targets:
+            kind, location, doc = discover(target, src.headers)
+            say(f"Found {kind} description: {location}")
+            spec_label.append(location)
+            if kind == "openapi":
+                found, base = load_openapi(location, src.headers, raw=doc)
+                eps += found
+                spec_base = spec_base or base
+            else:
+                eps += load_postman(location, src.headers)
+                var = {v.get("key"): v.get("value") for v in (doc.get("variable") or [])}
+                if not spec_base and isinstance(var.get("baseUrl"), str) and is_url(var["baseUrl"]):
+                    spec_base = var["baseUrl"]
+        if not src.empty():
+            more, base = load_endpoints(src)
+            eps += more
+            spec_base = spec_base or base
+    except (ValueError, FileNotFoundError, OSError) as ex:
+        print(f"error: {ex}", file=sys.stderr)
+        return 2
+    base_url = a.base_url or spec_base
+    if not base_url and src.urls:
+        from urllib.parse import urlsplit
+        u = urlsplit(src.urls[0].split("->")[0].strip())
+        base_url = f"{u.scheme}://{u.netloc}"
+    if not base_url or not is_url(base_url):
+        print("error: can't tell the API's base URL from the spec; pass --base-url https://...", file=sys.stderr)
+        return 2
+    eps = select_eps(eps, a.include, a.exclude, a.tag)
+    if not eps:
+        print("No endpoints matched.", file=sys.stderr)
+        return 1
+
+    params = _params(a.param, parser)
+    opts = Options(count=a.count, seed=a.seed, invalid=not a.no_invalid, boundary=not a.no_boundary,
+                   hostile=a.hostile, max_invalid=a.max_invalid, methods=None)
+    # parameters are resolved at run time (created/discovered records), so generate without pinning
+    results, problems, seed = generate_cases(eps, Options(**{**opts.__dict__, "methods": ["GET", "HEAD", "POST", "PUT",
+                                                                                         "PATCH", "DELETE", "OPTIONS"]}))
+    n_cases = sum(len(c) for _, c in results)
+    say(f"Testing {len(results)} endpoint(s) at {base_url}: {n_cases} cases, seed {seed}, mode {a.mode}")
+    if problems:
+        say(f"warning: self-check found {len(problems)} generated case(s) that don't match the schema as intended")
+
+    basic = tuple(a.basic.split(":", 1)) if a.basic and ":" in a.basic else None
+    creds = Credentials(token=a.token, api_key=a.api_key, api_key_name=a.api_key_header, basic=basic)
+    runner = Runner(base_url, creds, headers=src.headers, mode=a.mode, rps=a.rps, timeout=a.timeout,
+                    pinned=params, verify_tls=not a.insecure, progress=say)
+    started = time.time()
+    try:
+        outcomes = runner.run(results)
+    except Unreachable as ex:
+        print(f"error: {ex}. Check the URL/network, or pass --base-url if the spec's server is wrong.",
+              file=sys.stderr)
+        return 2
+
+    hints = []
+    t = totals(outcomes)
+    if runner.missing_credentials:
+        hints.append(f"The spec asks for {', '.join(sorted(runner.missing_credentials))} credentials that weren't "
+                     f"given; protected endpoints may only show 401/403. Pass --token / --api-key / --basic.")
+    if any(o.category == "missing-data" for o in outcomes):
+        hints.append("Some cases were skipped because no suitable record existed; --param NAME=VALUE supplies one.")
+    meta = {"title": (doc.get("info") or {}).get("title") if a.targets and isinstance(doc, dict) else "API",
+            "target": " ".join(a.targets) or None, "spec": ", ".join(spec_label) or None, "base_url": base_url,
+            "mode": a.mode, "seed": seed, "requests": runner.requests_sent,
+            "started": datetime.fromtimestamp(started, timezone.utc).isoformat(timespec="seconds"),
+            "duration_s": round(time.time() - started, 1), "hints": hints}
+    print(console(outcomes, meta))
+    paths = write_reports(outcomes, Path(a.out), meta)
+    print(f"\nReports: {', '.join(str(p) for p in paths)}")
+    fail_on = set() if a.fail_on.strip() == "none" else {x.strip() for x in a.fail_on.split(",") if x.strip()}
+    unknown = fail_on - set(BUG_CATEGORIES)
+    if unknown:
+        parser.error(f"unknown --fail-on categories {sorted(unknown)}; choose from {', '.join(BUG_CATEGORIES)}")
+    return 1 if any(o.verdict == "bug" and o.category in fail_on for o in outcomes) else 0
 
 
 def _params(items: List[str], parser: argparse.ArgumentParser) -> dict:

@@ -1,12 +1,14 @@
 """OpenAPI 3.0 / 3.1 and Swagger 2.0 -> endpoints."""
 from __future__ import annotations
 
+import copy
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
-from ..fetch import load_document, source_name
+from ..fetch import is_url, load_document, source_name
 from ..model import Endpoint, Param
-from ..schema import SpecError, convert_document, deref
+from ..schema import SpecError, convert_document, deref, resolve_pointer
 
 METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
 _PARAM_SCHEMA_KEYS = ("type", "format", "enum", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
@@ -30,20 +32,65 @@ def _media(content: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, A
     return order[0], content[order[0]]
 
 
-def default_base_url(raw: Dict[str, Any]) -> Optional[str]:
+def default_base_url(raw: Dict[str, Any], src: Optional[str] = None) -> Optional[str]:
+    """Base URL from servers/host. Relative server URLs (e.g. "/api/v3") resolve against the URL the
+    spec was downloaded from, as the OpenAPI spec defines; no servers at all means the spec's origin."""
+    spec_url = src if src and is_url(src) else None
     if "swagger" in raw:
         host = raw.get("host")
+        base_path = raw.get("basePath", "")
         if not host:
-            return raw.get("basePath") or None
-        scheme = (raw.get("schemes") or ["https"])[0]
-        return f"{scheme}://{host}{raw.get('basePath', '')}"
+            if spec_url:
+                parts = urlsplit(spec_url)
+                return f"{parts.scheme}://{parts.netloc}{base_path}"
+            return base_path or None
+        scheme = (raw.get("schemes") or [urlsplit(spec_url).scheme if spec_url else "https"])[0]
+        return f"{scheme}://{host}{base_path}"
     servers = raw.get("servers") or []
     if servers and isinstance(servers[0], dict) and servers[0].get("url"):
         url = servers[0]["url"]
         for name, var in (servers[0].get("variables") or {}).items():
             url = url.replace("{" + name + "}", str(var.get("default", "")))
-        return url
+        if spec_url and not is_url(url):
+            url = urljoin(spec_url, url)
+        return url.rstrip("/") or url
+    if spec_url:
+        return urljoin(spec_url, "/").rstrip("/")
     return None
+
+
+def bundle_external_refs(raw: Dict[str, Any], src: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Inlines $refs that point to other files/URLs (multi-file specs), relative to the referring file."""
+    cache: Dict[str, Any] = {src: raw}
+
+    def load(target: str) -> Any:
+        if target not in cache:
+            cache[target] = load_document(target, headers)
+        return cache[target]
+
+    def locate(base: str, loc: str) -> str:
+        return urljoin(base, loc) if is_url(base) else str((Path(base).parent / loc).resolve())
+
+    def walk(node: Any, base: str, depth: int) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and (not ref.startswith("#") or base != src):
+                if depth > 12:
+                    return {}
+                loc, _, frag = ref.partition("#")
+                target = locate(base, loc) if loc else base
+                try:
+                    tdoc = load(target)
+                    tnode = resolve_pointer(tdoc, "#" + frag) if frag else tdoc
+                except (OSError, ValueError) as e:
+                    raise SpecError(f"Cannot resolve $ref '{ref}' from {source_name(base)}: {e}") from e
+                return walk(copy.deepcopy(tnode), target, depth + 1)
+            return {k: walk(v, base, depth) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(x, base, depth) for x in node]
+        return node
+
+    return walk(raw, src, 0)
 
 
 def _auth_for(raw: Dict[str, Any], op: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -66,11 +113,15 @@ def _auth_for(raw: Dict[str, Any], op: Dict[str, Any]) -> Optional[Dict[str, str
     return None
 
 
-def load_openapi(src: str, headers: Optional[Dict[str, str]] = None) -> Tuple[List[Endpoint], Optional[str]]:
-    """Returns (endpoints, default base URL from servers/host)."""
-    raw = load_document(src, headers)
+def load_openapi(src: str, headers: Optional[Dict[str, str]] = None,
+                 raw: Optional[Dict[str, Any]] = None) -> Tuple[List[Endpoint], Optional[str]]:
+    """Returns (endpoints, default base URL from servers/host). ``raw`` skips re-downloading."""
+    if raw is None:
+        raw = load_document(src, headers)
     if not isinstance(raw, dict) or not ("openapi" in raw or "swagger" in raw):
         raise SpecError(f"{source_name(src)}: not an OpenAPI/Swagger document (no 'openapi' or 'swagger' key)")
+    if any(isinstance(v, str) and not v.startswith("#") for v in _refs(raw)):
+        raw = bundle_external_refs(raw, src, headers)
     doc = convert_document(raw)
     swagger2 = "swagger" in raw
     name = f"openapi:{source_name(src)}"
@@ -128,7 +179,19 @@ def load_openapi(src: str, headers: Optional[Dict[str, str]] = None) -> Tuple[Li
                     ep.content_type = ct or "application/json"
                     ep.body_required = bool(body.get("required"))
             endpoints.append(ep)
-    return endpoints, default_base_url(raw)
+    return endpoints, default_base_url(raw, src)
+
+
+def _refs(node: Any):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "$ref":
+                yield v
+            else:
+                yield from _refs(v)
+    elif isinstance(node, list):
+        for x in node:
+            yield from _refs(x)
 
 
 def path_of(url: str) -> str:
